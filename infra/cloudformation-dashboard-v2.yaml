@@ -1,0 +1,250 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'Weather Dashboard - CloudFront + ALB + EC2 Streamlit (auto-discover subnets)'
+
+Parameters:
+  InstanceId:
+    Type: String
+    Default: i-0b403a5684524a722
+    Description: EC2 instance ID (dev machine us-east-1)
+  
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+    Default: vpc-098732f5e0774d174
+    Description: VPC ID
+
+Resources:
+  # Security Group for ALB
+  ALBSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Allow HTTP from CloudFront only
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+          Description: HTTP from anywhere (CloudFront validates via secret header)
+      SecurityGroupEgress:
+        - IpProtocol: tcp
+          FromPort: 8501
+          ToPort: 8501
+          CidrIp: 10.0.0.0/16
+          Description: To Streamlit on EC2
+      Tags:
+        - Key: Name
+          Value: weather-dashboard-alb-sg
+
+  # Application Load Balancer (uses default VPC subnets)
+  ApplicationLoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Name: weather-dashboard-alb
+      Type: application
+      Scheme: internet-facing
+      IpAddressType: ipv4
+      # Automatically use all subnets in the VPC
+      SubnetMappings:
+        - SubnetId: !Select [0, !GetAtt GetSubnets.SubnetIds]
+        - SubnetId: !Select [1, !GetAtt GetSubnets.SubnetIds]
+      SecurityGroups:
+        - !Ref ALBSecurityGroup
+      Tags:
+        - Key: Name
+          Value: weather-dashboard-alb
+
+  # Custom resource to get subnets
+  GetSubnets:
+    Type: Custom::GetSubnets
+    Properties:
+      ServiceToken: !GetAtt GetSubnetsFunction.Arn
+      VpcId: !Ref VpcId
+
+  GetSubnetsFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: GetSubnetsForALB
+      Runtime: python3.12
+      Handler: index.handler
+      Role: !GetAtt GetSubnetsFunctionRole.Arn
+      Code:
+        ZipFile: |
+          import json
+          import boto3
+          import cfnresponse
+          
+          def handler(event, context):
+              try:
+                  if event['RequestType'] == 'Delete':
+                      cfnresponse.send(event, context, cfnresponse.SUCCESS, {})
+                      return
+                  
+                  vpc_id = event['ResourceProperties']['VpcId']
+                  ec2 = boto3.client('ec2')
+                  
+                  response = ec2.describe_subnets(
+                      Filters=[{'Name': 'vpc-id', 'Values': [vpc_id]}]
+                  )
+                  
+                  subnets = [s['SubnetId'] for s in response['Subnets']]
+                  
+                  if len(subnets) < 2:
+                      raise Exception(f"Need at least 2 subnets in VPC, found {len(subnets)}")
+                  
+                  cfnresponse.send(event, context, cfnresponse.SUCCESS, {
+                      'SubnetIds': subnets[:2]  # Return first 2 subnets
+                  })
+              except Exception as e:
+                  print(f"Error: {e}")
+                  cfnresponse.send(event, context, cfnresponse.FAILED, {})
+
+  GetSubnetsFunctionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: DescribeSubnets
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ec2:DescribeSubnets
+                Resource: '*'
+
+  # Target Group
+  TargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: weather-dashboard-tg
+      Port: 8501
+      Protocol: HTTP
+      VpcId: !Ref VpcId
+      TargetType: instance
+      HealthCheckEnabled: true
+      HealthCheckPath: /_stcore/health
+      HealthCheckProtocol: HTTP
+      HealthCheckIntervalSeconds: 30
+      HealthCheckTimeoutSeconds: 10
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 3
+      Matcher:
+        HttpCode: 200,301,302
+      Targets:
+        - Id: !Ref InstanceId
+          Port: 8501
+      Tags:
+        - Key: Name
+          Value: weather-dashboard-tg
+
+  # ALB Listener with secret header validation
+  ALBListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref ApplicationLoadBalancer
+      Port: 80
+      Protocol: HTTP
+      DefaultActions:
+        - Type: fixed-response
+          FixedResponseConfig:
+            StatusCode: 403
+            ContentType: text/plain
+            MessageBody: Direct access not allowed
+
+  # Listener Rule with secret header
+  ListenerRule:
+    Type: AWS::ElasticLoadBalancingV2::ListenerRule
+    Properties:
+      ListenerArn: !Ref ALBListener
+      Priority: 1
+      Conditions:
+        - Field: http-header
+          HttpHeaderConfig:
+            HttpHeaderName: X-CloudFront-Secret
+            Values:
+              - !Sub '{{resolve:secretsmanager:weather-dashboard-cf-secret:SecretString:secret}}'
+      Actions:
+        - Type: forward
+          TargetGroupArn: !Ref TargetGroup
+
+  # CloudFront Distribution
+  CloudFrontDistribution:
+    Type: AWS::CloudFront::Distribution
+    Properties:
+      DistributionConfig:
+        Enabled: true
+        Comment: Weather Dashboard
+        DefaultCacheBehavior:
+          TargetOriginId: alb-origin
+          ViewerProtocolPolicy: redirect-to-https
+          AllowedMethods:
+            - GET
+            - HEAD
+            - OPTIONS
+            - PUT
+            - POST
+            - PATCH
+            - DELETE
+          CachedMethods:
+            - GET
+            - HEAD
+          Compress: true
+          ForwardedValues:
+            QueryString: true
+            Headers:
+              - Host
+              - Origin
+              - Referer
+              - User-Agent
+              - CloudFront-Forwarded-Proto
+              - CloudFront-Is-Desktop-Viewer
+              - CloudFront-Is-Mobile-Viewer
+              - CloudFront-Is-SmartTV-Viewer
+              - CloudFront-Is-Tablet-Viewer
+            Cookies:
+              Forward: all
+          MinTTL: 0
+          DefaultTTL: 0
+          MaxTTL: 86400
+        Origins:
+          - Id: alb-origin
+            DomainName: !GetAtt ApplicationLoadBalancer.DNSName
+            CustomOriginConfig:
+              HTTPPort: 80
+              OriginProtocolPolicy: http-only
+              OriginReadTimeout: 60
+              OriginKeepaliveTimeout: 5
+            OriginCustomHeaders:
+              - HeaderName: X-CloudFront-Secret
+                HeaderValue: !Sub '{{resolve:secretsmanager:weather-dashboard-cf-secret:SecretString:secret}}'
+        PriceClass: PriceClass_100
+        ViewerCertificate:
+          CloudFrontDefaultCertificate: true
+        HttpVersion: http2
+
+Outputs:
+  CloudFrontURL:
+    Description: CloudFront Distribution URL
+    Value: !Sub 'https://${CloudFrontDistribution.DomainName}'
+    Export:
+      Name: WeatherDashboardURL
+
+  ALBDNSName:
+    Description: Application Load Balancer DNS Name
+    Value: !GetAtt ApplicationLoadBalancer.DNSName
+    Export:
+      Name: WeatherDashboardALB
+
+  ALBSecurityGroupId:
+    Description: ALB Security Group ID
+    Value: !Ref ALBSecurityGroup
+    Export:
+      Name: WeatherDashboardALBSG
