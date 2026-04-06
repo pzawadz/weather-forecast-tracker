@@ -32,11 +32,24 @@ FILES_TO_SYNC=(
     ".gitignore"
 )
 
+# Directories to sync
+DIRS_TO_SYNC=(
+    "infra"
+)
+
 # Copy files
 for file in "${FILES_TO_SYNC[@]}"; do
     if [ -f "$PROD_DIR/$file" ]; then
         cp "$PROD_DIR/$file" "$REPO_DIR/$file"
         echo "  ✓ $file"
+    fi
+done
+
+# Copy directories
+for dir in "${DIRS_TO_SYNC[@]}"; do
+    if [ -d "$PROD_DIR/$dir" ]; then
+        cp -r "$PROD_DIR/$dir" "$REPO_DIR/"
+        echo "  ✓ $dir/"
     fi
 done
 
