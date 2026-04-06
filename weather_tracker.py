@@ -160,8 +160,27 @@ def save_observation(date, temp_max):
     print(f"✓ Saved observation: {date} → {temp_max}°C")
 
 
+def get_model_bias(model, days_back=7):
+    """Get average bias for a model over last N days"""
+    conn = sqlite3.connect('weather_forecasts.db')
+    c = conn.cursor()
+    
+    c.execute('''
+        SELECT AVG(bias) 
+        FROM model_bias
+        WHERE model = ? 
+          AND date >= date('now', '-' || ? || ' days')
+          AND hours_ahead BETWEEN 20 AND 28
+    ''', (model, days_back))
+    
+    row = c.fetchone()
+    conn.close()
+    
+    return row[0] if row and row[0] is not None else 0.0
+
+
 def collect_forecasts():
-    """Collect forecasts from all models for tomorrow"""
+    """Collect forecasts from all models for tomorrow with bias correction"""
     now = datetime.now()
     tomorrow = (now + timedelta(days=1)).date()
     hours_until_tomorrow = (datetime.combine(tomorrow, datetime.min.time()) - now).total_seconds() / 3600
@@ -169,23 +188,46 @@ def collect_forecasts():
     print(f"\n📊 Collecting forecasts for {tomorrow} ({hours_until_tomorrow:.1f}h ahead)")
     print(f"   Forecast time: {now.strftime('%Y-%m-%d %H:%M:%S')}")
     
-    forecasts = []
+    forecasts_raw = []
+    forecasts_corrected = []
     
     for model in MODELS:
         temp_max = fetch_forecast(model, tomorrow)
         if temp_max is not None:
+            # Save raw forecast
             save_forecast(model, now, tomorrow, int(hours_until_tomorrow), temp_max)
-            forecasts.append(temp_max)
-            print(f"   ✓ {model:25s} → {temp_max:5.1f}°C")
+            forecasts_raw.append(temp_max)
+            
+            # Apply bias correction
+            bias = get_model_bias(model, days_back=7)
+            temp_corrected = temp_max - bias
+            forecasts_corrected.append(temp_corrected)
+            
+            print(f"   ✓ {model:25s} → {temp_max:5.1f}°C (bias: {bias:+.2f}°C, corrected: {temp_corrected:5.1f}°C)")
     
-    if forecasts:
-        median = statistics.median(forecasts)
-        mean = statistics.mean(forecasts)
-        print(f"\n   📈 Ensemble median: {median:.1f}°C, mean: {mean:.1f}°C")
-        save_forecast("ENSEMBLE_MEDIAN", now, tomorrow, int(hours_until_tomorrow), median)
-        save_forecast("ENSEMBLE_MEAN", now, tomorrow, int(hours_until_tomorrow), mean)
+    if forecasts_raw:
+        # Raw ensemble
+        median_raw = statistics.median(forecasts_raw)
+        mean_raw = statistics.mean(forecasts_raw)
+        
+        # Bias-corrected ensemble
+        median_corrected = statistics.median(forecasts_corrected)
+        mean_corrected = statistics.mean(forecasts_corrected)
+        std_dev = statistics.stdev(forecasts_corrected) if len(forecasts_corrected) > 1 else 0.0
+        
+        print(f"\n   📈 Raw ensemble: median={median_raw:.1f}°C, mean={mean_raw:.1f}°C")
+        print(f"   🎯 Bias-corrected: median={median_corrected:.1f}°C, mean={mean_corrected:.1f}°C, σ={std_dev:.1f}°C")
+        
+        # Save both versions
+        save_forecast("ENSEMBLE_MEDIAN", now, tomorrow, int(hours_until_tomorrow), median_raw)
+        save_forecast("ENSEMBLE_MEAN", now, tomorrow, int(hours_until_tomorrow), mean_raw)
+        save_forecast("ENSEMBLE_CORRECTED", now, tomorrow, int(hours_until_tomorrow), median_corrected)
+        
+        # Betting recommendation
+        confidence = "HIGH" if std_dev < 1.0 else "MEDIUM" if std_dev < 2.0 else "LOW"
+        print(f"\n   💰 BETTING: {median_corrected:.1f}°C (confidence: {confidence}, spread: ±{std_dev:.1f}°C)")
     
-    return len(forecasts)
+    return len(forecasts_raw)
 
 
 def collect_observation():
