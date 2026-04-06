@@ -20,11 +20,12 @@ HISTORICAL_URL = "https://archive-api.open-meteo.com/v1/archive"
 
 # Models available in Open-Meteo
 MODELS = [
-    "ecmwf_ifs025",      # ECMWF IFS 0.25°
-    "gfs_global",        # GFS Global
-    "icon_global",       # ICON Global
+    "ecmwf_ifs025",          # ECMWF IFS 0.25° (best global)
+    "icon_eu",               # ICON-EU 0.0625° (7km, excellent for Poland) 🇵🇱
+    "gfs_global",            # GFS Global
+    "icon_global",           # ICON Global
     "meteofrance_seamless",  # Meteo France
-    "gem_global",        # GEM Global
+    "gem_global",            # GEM Global
 ]
 
 
