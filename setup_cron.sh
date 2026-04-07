@@ -3,7 +3,14 @@
 # Setup cron jobs for weather forecast tracker + betting recommendations
 #
 
-PROJECT_DIR="/home/ubuntu/.openclaw/workspace/projekty/weather-forecast-tracker"
+# Auto-detect project directory (run from project root or specify path)
+if [ -f "./weather_tracker.py" ]; then
+    PROJECT_DIR="$(pwd)"
+else
+    # Default for production (eu-west-1)
+    PROJECT_DIR="/home/ubuntu/weather-forecast-tracker"
+fi
+
 CRON_USER=$(whoami)
 
 echo "Setting up cron jobs for weather forecast tracker + betting..."
