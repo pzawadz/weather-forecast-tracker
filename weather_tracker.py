@@ -9,6 +9,7 @@ import requests
 from datetime import datetime, timedelta
 import json
 import statistics
+import time
 
 # Warsaw coordinates
 LAT = 52.2297
@@ -27,6 +28,37 @@ MODELS = [
     "meteofrance_seamless",  # Meteo France
     "gem_global",            # GEM Global
 ]
+
+# Retry configuration
+MAX_RETRIES = 3
+RETRY_DELAYS = [5, 15, 30]  # seconds (exponential backoff)
+
+
+def retry_with_backoff(func, *args, max_retries=MAX_RETRIES, delays=RETRY_DELAYS, **kwargs):
+    """
+    Retry a function with exponential backoff
+    
+    Args:
+        func: Function to retry
+        max_retries: Maximum number of attempts
+        delays: List of delays between retries (seconds)
+    
+    Returns:
+        Result of func or None if all retries fail
+    """
+    for attempt in range(max_retries):
+        try:
+            return func(*args, **kwargs)
+        except Exception as e:
+            if attempt == max_retries - 1:
+                # Last attempt failed
+                raise
+            else:
+                delay = delays[attempt] if attempt < len(delays) else delays[-1]
+                print(f"      Retry {attempt + 1}/{max_retries} after {delay}s...")
+                time.sleep(delay)
+    
+    return None
 
 
 def init_db():
@@ -75,60 +107,75 @@ def init_db():
     print("✓ Database initialized")
 
 
+def _fetch_forecast_single(model, target_date):
+    """Single attempt to fetch forecast (used by retry wrapper)"""
+    params = {
+        'latitude': LAT,
+        'longitude': LON,
+        'daily': 'temperature_2m_max',
+        'timezone': 'Europe/Warsaw',
+        'start_date': target_date.strftime('%Y-%m-%d'),
+        'end_date': target_date.strftime('%Y-%m-%d'),
+        'models': model,
+    }
+    
+    response = requests.get(FORECAST_URL, params=params, timeout=10)
+    response.raise_for_status()
+    data = response.json()
+    
+    if 'daily' in data and 'temperature_2m_max' in data['daily']:
+        temp_max = data['daily']['temperature_2m_max'][0]
+        return temp_max
+    else:
+        raise ValueError(f"No data returned for {target_date}")
+
+
 def fetch_forecast(model, target_date):
-    """Fetch tomorrow's max temp forecast from a specific model"""
+    """Fetch tomorrow's max temp forecast from a specific model (with retry)"""
     try:
-        params = {
-            'latitude': LAT,
-            'longitude': LON,
-            'daily': 'temperature_2m_max',
-            'timezone': 'Europe/Warsaw',
-            'start_date': target_date.strftime('%Y-%m-%d'),
-            'end_date': target_date.strftime('%Y-%m-%d'),
-            'models': model,
-        }
-        
-        response = requests.get(FORECAST_URL, params=params, timeout=10)
-        response.raise_for_status()
-        data = response.json()
-        
-        if 'daily' in data and 'temperature_2m_max' in data['daily']:
-            temp_max = data['daily']['temperature_2m_max'][0]
-            return temp_max
-        else:
-            print(f"⚠️  {model}: No data for {target_date}")
-            return None
-            
+        temp_max = retry_with_backoff(_fetch_forecast_single, model, target_date)
+        return temp_max
     except Exception as e:
-        print(f"❌ {model}: {e}")
+        error_msg = str(e)
+        # Shorten long error messages
+        if len(error_msg) > 100:
+            error_msg = error_msg[:97] + "..."
+        print(f"❌ {model}: {error_msg}")
         return None
 
 
+def _fetch_actual_temp_single(date):
+    """Single attempt to fetch actual temperature (used by retry wrapper)"""
+    params = {
+        'latitude': LAT,
+        'longitude': LON,
+        'start_date': date.strftime('%Y-%m-%d'),
+        'end_date': date.strftime('%Y-%m-%d'),
+        'daily': 'temperature_2m_max',
+        'timezone': 'Europe/Warsaw',
+    }
+    
+    response = requests.get(HISTORICAL_URL, params=params, timeout=10)
+    response.raise_for_status()
+    data = response.json()
+    
+    if 'daily' in data and 'temperature_2m_max' in data['daily']:
+        temp_max = data['daily']['temperature_2m_max'][0]
+        return temp_max
+    else:
+        raise ValueError(f"No observation data for {date}")
+
+
 def fetch_actual_temp(date):
-    """Fetch actual observed max temp for a given date"""
+    """Fetch actual observed max temp for a given date (with retry)"""
     try:
-        params = {
-            'latitude': LAT,
-            'longitude': LON,
-            'start_date': date.strftime('%Y-%m-%d'),
-            'end_date': date.strftime('%Y-%m-%d'),
-            'daily': 'temperature_2m_max',
-            'timezone': 'Europe/Warsaw',
-        }
-        
-        response = requests.get(HISTORICAL_URL, params=params, timeout=10)
-        response.raise_for_status()
-        data = response.json()
-        
-        if 'daily' in data and 'temperature_2m_max' in data['daily']:
-            temp_max = data['daily']['temperature_2m_max'][0]
-            return temp_max
-        else:
-            print(f"⚠️  No observation data for {date}")
-            return None
-            
+        temp_max = retry_with_backoff(_fetch_actual_temp_single, date)
+        return temp_max
     except Exception as e:
-        print(f"❌ Observation fetch error: {e}")
+        error_msg = str(e)
+        if len(error_msg) > 100:
+            error_msg = error_msg[:97] + "..."
+        print(f"❌ Observation fetch error: {error_msg}")
         return None
 
 
