@@ -14,12 +14,12 @@ Parameters:
   
   SubnetIds:
     Type: CommaDelimitedList
-    Description: Subnet IDs for ALB (at least 2 in different AZs)
+    Description: Subnet IDs for ALB (must include eu-west-1c where EC2 is located)
   
   DashboardPort:
     Type: Number
     Default: 8502
-    Description: Port where Streamlit dashboard runs
+    Description: Port where Streamlit dashboard runs (must match systemd service)
 
 Resources:
   # Security Group for ALB
@@ -69,6 +69,7 @@ Resources:
       VpcId: !Ref VpcId
       TargetType: instance
       HealthCheckEnabled: true
+      # Streamlit native health check endpoint - lightweight, returns "ok"
       HealthCheckPath: /_stcore/health
       HealthCheckProtocol: HTTP
       HealthCheckIntervalSeconds: 30
@@ -76,7 +77,7 @@ Resources:
       HealthyThresholdCount: 2
       UnhealthyThresholdCount: 3
       Matcher:
-        HttpCode: 200,301,302
+        HttpCode: 200
       Targets:
         - Id: !Ref InstanceId
           Port: !Ref DashboardPort
@@ -120,7 +121,7 @@ Resources:
     Properties:
       DistributionConfig:
         Enabled: true
-        Comment: Weather Dashboard (EU)
+        Comment: Weather Dashboard (EU-WEST-1)
         DefaultCacheBehavior:
           TargetOriginId: alb-origin
           ViewerProtocolPolicy: redirect-to-https
@@ -183,7 +184,13 @@ Outputs:
       Name: WeatherDashboardEUALB
 
   ALBSecurityGroupId:
-    Description: ALB Security Group ID
+    Description: ALB Security Group ID (add to EC2 inbound rules for port 8502)
     Value: !Ref ALBSecurityGroup
     Export:
       Name: WeatherDashboardEUALBSG
+
+  TargetGroupArn:
+    Description: Target Group ARN
+    Value: !Ref TargetGroup
+    Export:
+      Name: WeatherDashboardEUTG
