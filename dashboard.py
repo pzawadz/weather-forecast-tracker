@@ -65,6 +65,10 @@ if not current_forecast.empty:
         forecast_time = pd.to_datetime(current_forecast['forecast_time'].iloc[0])
         hours_ahead = current_forecast['hours_ahead'].iloc[0]
         
+        # Calculate time since last update
+        now = datetime.now()
+        hours_since_update = (now - forecast_time.to_pydatetime()).total_seconds() / 3600
+        
         # Display metrics
         col1, col2, col3, col4, col5 = st.columns(5)
         
@@ -90,9 +94,9 @@ if not current_forecast.empty:
         )
         
         col5.metric(
-            label="Updated",
-            value=f"{hours_ahead:.0f}h ago",
-            delta=forecast_time.strftime('%H:%M')
+            label="Last Update",
+            value=f"{hours_since_update:.1f}h ago",
+            delta=f"{hours_ahead:.0f}h ahead"
         )
         
         # Model breakdown
