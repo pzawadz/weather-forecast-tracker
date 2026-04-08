@@ -185,6 +185,115 @@ if not performance.empty:
 else:
     st.info(f"No performance data for last {days_back} days. System needs at least 1 day of history.")
 
+# Accuracy Over Time
+st.header("📉 Accuracy Over Time")
+
+query_accuracy = """
+SELECT 
+    o.date,
+    o.temp_max as actual,
+    AVG(CASE WHEN f.model NOT LIKE 'ENSEMBLE%' THEN f.temp_max END) as forecast_avg,
+    ABS(AVG(CASE WHEN f.model NOT LIKE 'ENSEMBLE%' THEN f.temp_max END) - o.temp_max) as error,
+    COUNT(DISTINCT CASE WHEN f.model NOT LIKE 'ENSEMBLE%' THEN f.model END) as model_count
+FROM observations o
+LEFT JOIN forecasts f ON f.target_date = o.date
+WHERE o.date >= date('now', '-' || ? || ' days')
+GROUP BY o.date
+ORDER BY o.date ASC
+"""
+accuracy_data = load_data(query_accuracy, (days_back,))
+
+if not accuracy_data.empty and len(accuracy_data) > 0:
+    # Calculate MAE
+    mae = accuracy_data['error'].mean()
+    best_day = accuracy_data.loc[accuracy_data['error'].idxmin()]
+    worst_day = accuracy_data.loc[accuracy_data['error'].idxmax()]
+    
+    # Metrics
+    col1, col2, col3, col4 = st.columns(4)
+    col1.metric("Mean Absolute Error", f"{mae:.2f}°C")
+    col2.metric("Best Forecast", f"{best_day['error']:.2f}°C", 
+                delta=f"{best_day['date']}", delta_color="off")
+    col3.metric("Worst Forecast", f"{worst_day['error']:.2f}°C",
+                delta=f"{worst_day['date']}", delta_color="off")
+    col4.metric("Days Tracked", len(accuracy_data))
+    
+    # Time series chart
+    st.subheader("Error Over Time")
+    
+    fig = go.Figure()
+    
+    # Add error line
+    fig.add_trace(go.Scatter(
+        x=accuracy_data['date'],
+        y=accuracy_data['error'],
+        mode='lines+markers',
+        name='Forecast Error',
+        line=dict(color='red', width=2),
+        marker=dict(size=8)
+    ))
+    
+    # Add MAE reference line
+    fig.add_trace(go.Scatter(
+        x=accuracy_data['date'],
+        y=[mae] * len(accuracy_data),
+        mode='lines',
+        name=f'Mean Error ({mae:.2f}°C)',
+        line=dict(color='gray', width=1, dash='dash')
+    ))
+    
+    # Add shaded area for good/bad performance
+    fig.add_hrect(y0=0, y1=1.0, fillcolor="green", opacity=0.1, 
+                  annotation_text="Excellent (<1°C)", annotation_position="right")
+    fig.add_hrect(y0=1.0, y1=2.0, fillcolor="yellow", opacity=0.1,
+                  annotation_text="Good (1-2°C)", annotation_position="right")
+    fig.add_hrect(y0=2.0, y1=accuracy_data['error'].max() * 1.1, fillcolor="red", opacity=0.1,
+                  annotation_text="Poor (>2°C)", annotation_position="right")
+    
+    fig.update_layout(
+        xaxis_title="Date",
+        yaxis_title="Absolute Error (°C)",
+        hovermode='x unified',
+        height=400
+    )
+    
+    st.plotly_chart(fig, use_container_width=True)
+    
+    # Model comparison over time
+    st.subheader("Model Accuracy Comparison")
+    
+    query_models = """
+    SELECT 
+        f.model,
+        o.date,
+        ABS(f.temp_max - o.temp_max) as error
+    FROM forecasts f
+    JOIN observations o ON f.target_date = o.date
+    WHERE f.model NOT LIKE 'ENSEMBLE%'
+      AND o.date >= date('now', '-' || ? || ' days')
+    ORDER BY o.date, f.model
+    """
+    model_accuracy = load_data(query_models, (days_back,))
+    
+    if not model_accuracy.empty:
+        fig = px.line(
+            model_accuracy,
+            x='date',
+            y='error',
+            color='model',
+            markers=True,
+            title="Individual Model Errors Over Time"
+        )
+        fig.update_layout(
+            xaxis_title="Date",
+            yaxis_title="Absolute Error (°C)",
+            height=400
+        )
+        st.plotly_chart(fig, use_container_width=True)
+    
+else:
+    st.info("No accuracy data yet. System needs observations (run daily at 8 AM).")
+
 # Forecast Evolution
 st.header("🔄 Forecast Evolution")
 
