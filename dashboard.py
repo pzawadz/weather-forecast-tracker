@@ -510,6 +510,102 @@ if not observations.empty:
     obs_display.columns = ['Date', 'Max Temp', 'Recorded At']
     st.dataframe(obs_display, use_container_width=True)
 
+# Temperature Patterns Analysis
+st.header("🌡️ Accuracy by Temperature Range")
+
+def classify_temp(temp):
+    """Classify temperature into ranges"""
+    if temp < 0:
+        return "Freezing (<0°C)"
+    elif temp < 10:
+        return "Cold (0-10°C)"
+    elif temp < 20:
+        return "Cool (10-20°C)"
+    elif temp < 25:
+        return "Warm (20-25°C)"
+    else:
+        return "Hot (>25°C)"
+
+query_temp_patterns = """
+SELECT 
+    o.date,
+    o.temp_max as actual,
+    AVG(CASE WHEN f.model NOT LIKE 'ENSEMBLE%' THEN f.temp_max END) as forecast_avg,
+    ABS(AVG(CASE WHEN f.model NOT LIKE 'ENSEMBLE%' THEN f.temp_max END) - o.temp_max) as error
+FROM observations o
+LEFT JOIN forecasts f ON f.target_date = o.date
+WHERE o.date >= date('now', '-' || ? || ' days')
+GROUP BY o.date
+"""
+temp_patterns = load_data(query_temp_patterns, (days_back,))
+
+if not temp_patterns.empty and len(temp_patterns) > 0:
+    # Add temperature classification
+    temp_patterns['temp_range'] = temp_patterns['actual'].apply(classify_temp)
+    
+    # Calculate MAE by temperature range
+    mae_by_range = temp_patterns.groupby('temp_range').agg({
+        'error': ['mean', 'count']
+    }).reset_index()
+    mae_by_range.columns = ['temp_range', 'mae', 'count']
+    mae_by_range = mae_by_range[mae_by_range['count'] > 0]  # Only show ranges with data
+    
+    if not mae_by_range.empty:
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            # Bar chart: MAE by temperature range
+            fig = px.bar(
+                mae_by_range,
+                x='temp_range',
+                y='mae',
+                color='mae',
+                color_continuous_scale='RdYlGn_r',
+                text='mae',
+                title="Forecast Accuracy by Temperature Range"
+            )
+            fig.update_traces(texttemplate='%{text:.2f}°C', textposition='outside')
+            fig.update_layout(
+                xaxis_title="Temperature Range",
+                yaxis_title="Mean Absolute Error (°C)",
+                height=400,
+                showlegend=False
+            )
+            st.plotly_chart(fig, use_container_width=True)
+        
+        with col2:
+            # Sample count by range
+            fig2 = px.bar(
+                mae_by_range,
+                x='temp_range',
+                y='count',
+                color='count',
+                text='count',
+                title="Sample Count by Temperature Range"
+            )
+            fig2.update_traces(texttemplate='%{text}', textposition='outside')
+            fig2.update_layout(
+                xaxis_title="Temperature Range",
+                yaxis_title="Number of Days",
+                height=400,
+                showlegend=False
+            )
+            st.plotly_chart(fig2, use_container_width=True)
+        
+        # Insights
+        best_range = mae_by_range.loc[mae_by_range['mae'].idxmin()]
+        worst_range = mae_by_range.loc[mae_by_range['mae'].idxmax()]
+        
+        col1, col2 = st.columns(2)
+        col1.success(f"✓ Best accuracy: **{best_range['temp_range']}** (MAE: {best_range['mae']:.2f}°C)")
+        if best_range['temp_range'] != worst_range['temp_range']:
+            col2.warning(f"⚠ Worst accuracy: **{worst_range['temp_range']}** (MAE: {worst_range['mae']:.2f}°C)")
+        
+        st.info("💡 **Note:** This classification is based on observed temperatures only. "
+               "True weather pattern analysis (sunny/rainy/cloudy) requires weather codes from API.")
+else:
+    st.info("Not enough data for temperature pattern analysis yet.")
+
 # Footer
 st.markdown("---")
 st.markdown("""
