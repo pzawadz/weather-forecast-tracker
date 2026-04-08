@@ -10,6 +10,7 @@ from datetime import datetime, timedelta
 import json
 import statistics
 import time
+import concurrent.futures
 
 # Warsaw coordinates
 LAT = 52.2297
@@ -227,20 +228,54 @@ def get_model_bias(model, days_back=7):
     return row[0] if row and row[0] is not None else 0.0
 
 
-def collect_forecasts():
-    """Collect forecasts from all models for tomorrow with bias correction"""
+def collect_forecasts(use_parallel=True):
+    """
+    Collect forecasts from all models for tomorrow with bias correction
+    
+    Args:
+        use_parallel: If True, fetch all models in parallel (faster).
+                     If False, fetch sequentially (safer, easier to debug).
+    """
     now = datetime.now()
     tomorrow = (now + timedelta(days=1)).date()
     hours_until_tomorrow = (datetime.combine(tomorrow, datetime.min.time()) - now).total_seconds() / 3600
     
     print(f"\n📊 Collecting forecasts for {tomorrow} ({hours_until_tomorrow:.1f}h ahead)")
     print(f"   Forecast time: {now.strftime('%Y-%m-%d %H:%M:%S')}")
+    if use_parallel:
+        print(f"   Mode: Parallel (6 models at once)")
     
     forecasts_raw = []
     forecasts_corrected = []
+    model_results = {}  # Store results with model names
     
+    if use_parallel:
+        # Parallel execution - fetch all models at once
+        with concurrent.futures.ThreadPoolExecutor(max_workers=6) as executor:
+            # Submit all fetch tasks
+            future_to_model = {
+                executor.submit(fetch_forecast, model, tomorrow): model 
+                for model in MODELS
+            }
+            
+            # Collect results as they complete
+            for future in concurrent.futures.as_completed(future_to_model):
+                model = future_to_model[future]
+                try:
+                    temp_max = future.result()
+                    model_results[model] = temp_max
+                except Exception as e:
+                    print(f"   ❌ {model}: Failed after retries ({e})")
+                    model_results[model] = None
+    else:
+        # Sequential execution (original behavior)
+        for model in MODELS:
+            temp_max = fetch_forecast(model, tomorrow)
+            model_results[model] = temp_max
+    
+    # Process results (same for both parallel and sequential)
     for model in MODELS:
-        temp_max = fetch_forecast(model, tomorrow)
+        temp_max = model_results.get(model)
         if temp_max is not None:
             # Save raw forecast
             save_forecast(model, now, tomorrow, int(hours_until_tomorrow), temp_max)
