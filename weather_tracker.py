@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Weather Forecast Tracker for Warsaw
-Collects forecasts every 4h, compares with actual observations
+Weather Forecast Tracker - Multi-Location Support
+Collects forecasts every 4h for multiple cities
 """
 
 import sqlite3
@@ -11,10 +11,43 @@ import json
 import statistics
 import time
 import concurrent.futures
+import argparse
 
-# Warsaw coordinates
-LAT = 52.2297
-LON = 21.0122
+# Location configurations
+LOCATIONS = {
+    'warsaw': {
+        'name': 'Warsaw',
+        'country': 'Poland',
+        'lat': 52.2297,
+        'lon': 21.0122,
+        'timezone': 'Europe/Warsaw',
+        'models_priority': ['icon_eu', 'ecmwf_ifs025']  # Best for Poland
+    },
+    'paris': {
+        'name': 'Paris',
+        'country': 'France',
+        'lat': 48.8566,
+        'lon': 2.3522,
+        'timezone': 'Europe/Paris',
+        'models_priority': ['meteofrance_seamless', 'ecmwf_ifs025']  # Native French
+    },
+    'munich': {
+        'name': 'Munich',
+        'country': 'Germany',
+        'lat': 48.1351,
+        'lon': 11.5820,
+        'timezone': 'Europe/Berlin',
+        'models_priority': ['icon_eu', 'ecmwf_ifs025']  # Native German (ICON-EU)
+    },
+    'london': {
+        'name': 'London',
+        'country': 'UK',
+        'lat': 51.5074,
+        'lon': -0.1278,
+        'timezone': 'Europe/London',
+        'models_priority': ['ecmwf_ifs025', 'icon_eu']  # ECMWF good for UK
+    }
+}
 
 # Open-Meteo API endpoints
 FORECAST_URL = "https://api.open-meteo.com/v1/forecast"
@@ -23,10 +56,10 @@ HISTORICAL_URL = "https://archive-api.open-meteo.com/v1/archive"
 # Models available in Open-Meteo
 MODELS = [
     "ecmwf_ifs025",          # ECMWF IFS 0.25° (best global)
-    "icon_eu",               # ICON-EU 0.0625° (7km, excellent for Poland) 🇵🇱
+    "icon_eu",               # ICON-EU 0.0625° (7km, excellent for Central Europe)
     "gfs_global",            # GFS Global
     "icon_global",           # ICON Global
-    "meteofrance_seamless",  # Meteo France
+    "meteofrance_seamless",  # Meteo France (best for France)
     "gem_global",            # GEM Global
 ]
 
@@ -76,6 +109,7 @@ def init_db():
             target_date DATE NOT NULL,
             hours_ahead INTEGER NOT NULL,
             temp_max REAL NOT NULL,
+            location TEXT NOT NULL DEFAULT 'warsaw',
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     ''')
@@ -84,9 +118,11 @@ def init_db():
     c.execute('''
         CREATE TABLE IF NOT EXISTS observations (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            date DATE NOT NULL UNIQUE,
+            date DATE NOT NULL,
             temp_max REAL NOT NULL,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            location TEXT NOT NULL DEFAULT 'warsaw',
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(date, location)
         )
     ''')
     
@@ -98,8 +134,9 @@ def init_db():
             date DATE NOT NULL,
             bias REAL NOT NULL,
             hours_ahead INTEGER NOT NULL,
+            location TEXT NOT NULL DEFAULT 'warsaw',
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            UNIQUE(model, date, hours_ahead)
+            UNIQUE(model, date, hours_ahead, location)
         )
     ''')
     
@@ -108,13 +145,14 @@ def init_db():
     print("✓ Database initialized")
 
 
-def _fetch_forecast_single(model, target_date):
+def _fetch_forecast_single(model, target_date, location_key):
     """Single attempt to fetch forecast (used by retry wrapper)"""
+    location = LOCATIONS[location_key]
     params = {
-        'latitude': LAT,
-        'longitude': LON,
+        'latitude': location['lat'],
+        'longitude': location['lon'],
         'daily': 'temperature_2m_max',
-        'timezone': 'Europe/Warsaw',
+        'timezone': location['timezone'],
         'start_date': target_date.strftime('%Y-%m-%d'),
         'end_date': target_date.strftime('%Y-%m-%d'),
         'models': model,
@@ -131,10 +169,10 @@ def _fetch_forecast_single(model, target_date):
         raise ValueError(f"No data returned for {target_date}")
 
 
-def fetch_forecast(model, target_date):
+def fetch_forecast(model, target_date, location_key='warsaw'):
     """Fetch tomorrow's max temp forecast from a specific model (with retry)"""
     try:
-        temp_max = retry_with_backoff(_fetch_forecast_single, model, target_date)
+        temp_max = retry_with_backoff(_fetch_forecast_single, model, target_date, location_key)
         return temp_max
     except Exception as e:
         error_msg = str(e)
@@ -145,15 +183,16 @@ def fetch_forecast(model, target_date):
         return None
 
 
-def _fetch_actual_temp_single(date):
+def _fetch_actual_temp_single(date, location_key):
     """Single attempt to fetch actual temperature (used by retry wrapper)"""
+    location = LOCATIONS[location_key]
     params = {
-        'latitude': LAT,
-        'longitude': LON,
+        'latitude': location['lat'],
+        'longitude': location['lon'],
+        'daily': 'temperature_2m_max',
+        'timezone': location['timezone'],
         'start_date': date.strftime('%Y-%m-%d'),
         'end_date': date.strftime('%Y-%m-%d'),
-        'daily': 'temperature_2m_max',
-        'timezone': 'Europe/Warsaw',
     }
     
     response = requests.get(HISTORICAL_URL, params=params, timeout=10)
@@ -164,97 +203,46 @@ def _fetch_actual_temp_single(date):
         temp_max = data['daily']['temperature_2m_max'][0]
         return temp_max
     else:
-        raise ValueError(f"No observation data for {date}")
+        raise ValueError(f"No data returned for {date}")
 
 
-def fetch_actual_temp(date):
-    """Fetch actual observed max temp for a given date (with retry)"""
+def fetch_actual_temp(date, location_key='warsaw'):
+    """Fetch actual max temp for a given date (with retry)"""
     try:
-        temp_max = retry_with_backoff(_fetch_actual_temp_single, date)
+        temp_max = retry_with_backoff(_fetch_actual_temp_single, date, location_key)
         return temp_max
     except Exception as e:
         error_msg = str(e)
         if len(error_msg) > 100:
             error_msg = error_msg[:97] + "..."
-        print(f"❌ Observation fetch error: {error_msg}")
+        print(f"❌ Error fetching actual temp: {error_msg}")
         return None
 
 
-def save_forecast(model, forecast_time, target_date, hours_ahead, temp_max):
-    """Save forecast to database"""
-    conn = sqlite3.connect('weather_forecasts.db')
-    c = conn.cursor()
+def collect_forecasts_parallel(location_key='warsaw', use_parallel=True):
+    """Collect forecasts from all models using parallel requests"""
+    location = LOCATIONS[location_key]
+    print(f"\n🌍 Collecting forecasts for {location['name']}, {location['country']}")
     
-    c.execute('''
-        INSERT INTO forecasts (model, forecast_time, target_date, hours_ahead, temp_max)
-        VALUES (?, ?, ?, ?, ?)
-    ''', (model, forecast_time, target_date, hours_ahead, temp_max))
-    
-    conn.commit()
-    conn.close()
-
-
-def save_observation(date, temp_max):
-    """Save actual observation to database"""
-    conn = sqlite3.connect('weather_forecasts.db')
-    c = conn.cursor()
-    
-    c.execute('''
-        INSERT OR REPLACE INTO observations (date, temp_max)
-        VALUES (?, ?)
-    ''', (date, temp_max))
-    
-    conn.commit()
-    conn.close()
-    print(f"✓ Saved observation: {date} → {temp_max}°C")
-
-
-def get_model_bias(model, days_back=7):
-    """Get average bias for a model over last N days"""
-    conn = sqlite3.connect('weather_forecasts.db')
-    c = conn.cursor()
-    
-    c.execute('''
-        SELECT AVG(bias) 
-        FROM model_bias
-        WHERE model = ? 
-          AND date >= date('now', '-' || ? || ' days')
-          AND hours_ahead BETWEEN 20 AND 28
-    ''', (model, days_back))
-    
-    row = c.fetchone()
-    conn.close()
-    
-    return row[0] if row and row[0] is not None else 0.0
-
-
-def collect_forecasts(use_parallel=True):
-    """
-    Collect forecasts from all models for tomorrow with bias correction
-    
-    Args:
-        use_parallel: If True, fetch all models in parallel (faster).
-                     If False, fetch sequentially (safer, easier to debug).
-    """
     now = datetime.now()
-    tomorrow = (now + timedelta(days=1)).date()
-    hours_until_tomorrow = (datetime.combine(tomorrow, datetime.min.time()) - now).total_seconds() / 3600
+    tomorrow = now.date() + timedelta(days=1)
+    hours_ahead = (datetime.combine(tomorrow, datetime.min.time()) - now).total_seconds() / 3600
     
-    print(f"\n📊 Collecting forecasts for {tomorrow} ({hours_until_tomorrow:.1f}h ahead)")
-    print(f"   Forecast time: {now.strftime('%Y-%m-%d %H:%M:%S')}")
+    print(f"📅 Target date: {tomorrow} ({hours_ahead:.1f}h ahead)")
+    print(f"🕐 Current time: {now.strftime('%Y-%m-%d %H:%M:%S')}")
+    
+    conn = sqlite3.connect('weather_forecasts.db')
+    c = conn.cursor()
+    
+    results = {}
+    start_time = time.time()
+    
     if use_parallel:
-        print(f"   Mode: Parallel (6 models at once)")
-    
-    forecasts_raw = []
-    forecasts_corrected = []
-    model_results = {}  # Store results with model names
-    
-    if use_parallel:
-        # Parallel execution - fetch all models at once
+        # Parallel requests using ThreadPoolExecutor
         with concurrent.futures.ThreadPoolExecutor(max_workers=6) as executor:
-            # Submit all fetch tasks
+            # Submit all tasks
             future_to_model = {
-                executor.submit(fetch_forecast, model, tomorrow): model 
+                executor.submit(fetch_forecast, model, tomorrow, location_key): model 
                 for model in MODELS
             }
             
@@ -263,170 +251,143 @@ def collect_forecasts(use_parallel=True):
                 model = future_to_model[future]
                 try:
                     temp_max = future.result()
-                    model_results[model] = temp_max
+                    if temp_max is not None:
+                        results[model] = temp_max
+                        c.execute('''
+                            INSERT INTO forecasts (model, forecast_time, target_date, hours_ahead, temp_max, location)
+                            VALUES (?, ?, ?, ?, ?, ?)
+                        ''', (model, now, tomorrow, hours_ahead, temp_max, location_key))
+                        print(f"✓ {model:25s} {temp_max:5.1f}°C")
+                    else:
+                        print(f"✗ {model:25s} failed")
                 except Exception as e:
-                    print(f"   ❌ {model}: Failed after retries ({e})")
-                    model_results[model] = None
+                    print(f"✗ {model:25s} error: {str(e)[:50]}")
     else:
-        # Sequential execution (original behavior)
+        # Sequential requests (fallback)
         for model in MODELS:
-            temp_max = fetch_forecast(model, tomorrow)
-            model_results[model] = temp_max
+            temp_max = fetch_forecast(model, tomorrow, location_key)
+            if temp_max is not None:
+                results[model] = temp_max
+                c.execute('''
+                    INSERT INTO forecasts (model, forecast_time, target_date, hours_ahead, temp_max, location)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                ''', (model, now, tomorrow, hours_ahead, temp_max, location_key))
+                print(f"✓ {model:25s} {temp_max:5.1f}°C")
     
-    # Process results (same for both parallel and sequential)
-    for model in MODELS:
-        temp_max = model_results.get(model)
-        if temp_max is not None:
-            # Save raw forecast
-            save_forecast(model, now, tomorrow, int(hours_until_tomorrow), temp_max)
-            forecasts_raw.append(temp_max)
-            
-            # Apply bias correction
-            bias = get_model_bias(model, days_back=7)
-            temp_corrected = temp_max - bias
-            forecasts_corrected.append(temp_corrected)
-            
-            print(f"   ✓ {model:25s} → {temp_max:5.1f}°C (bias: {bias:+.2f}°C, corrected: {temp_corrected:5.1f}°C)")
+    elapsed = time.time() - start_time
+    print(f"\n⏱️  Collection time: {elapsed:.2f}s")
     
-    if forecasts_raw:
-        # Raw ensemble
-        median_raw = statistics.median(forecasts_raw)
-        mean_raw = statistics.mean(forecasts_raw)
+    # Calculate ensemble if we have multiple forecasts
+    if len(results) >= 2:
+        temps = list(results.values())
+        ensemble_median = statistics.median(temps)
+        ensemble_mean = statistics.mean(temps)
         
-        # Bias-corrected ensemble
-        median_corrected = statistics.median(forecasts_corrected)
-        mean_corrected = statistics.mean(forecasts_corrected)
-        std_dev = statistics.stdev(forecasts_corrected) if len(forecasts_corrected) > 1 else 0.0
-        
-        print(f"\n   📈 Raw ensemble: median={median_raw:.1f}°C, mean={mean_raw:.1f}°C")
-        print(f"   🎯 Bias-corrected: median={median_corrected:.1f}°C, mean={mean_corrected:.1f}°C, σ={std_dev:.1f}°C")
-        
-        # Save both versions
-        save_forecast("ENSEMBLE_MEDIAN", now, tomorrow, int(hours_until_tomorrow), median_raw)
-        save_forecast("ENSEMBLE_MEAN", now, tomorrow, int(hours_until_tomorrow), mean_raw)
-        save_forecast("ENSEMBLE_CORRECTED", now, tomorrow, int(hours_until_tomorrow), median_corrected)
-        
-        # Betting recommendation
-        confidence = "HIGH" if std_dev < 1.0 else "MEDIUM" if std_dev < 2.0 else "LOW"
-        print(f"\n   💰 BETTING: {median_corrected:.1f}°C (confidence: {confidence}, spread: ±{std_dev:.1f}°C)")
-    
-    return len(forecasts_raw)
-
-
-def collect_observation():
-    """Collect actual observation for yesterday"""
-    yesterday = (datetime.now() - timedelta(days=1)).date()
-    
-    print(f"\n🌡️  Fetching observation for {yesterday}")
-    temp_max = fetch_actual_temp(yesterday)
-    
-    if temp_max is not None:
-        save_observation(yesterday, temp_max)
-        calculate_errors(yesterday)
-
-
-def calculate_errors(date):
-    """Calculate forecast errors for a given date"""
-    conn = sqlite3.connect('weather_forecasts.db')
-    c = conn.cursor()
-    
-    # Get actual observation
-    c.execute('SELECT temp_max FROM observations WHERE date = ?', (date,))
-    row = c.fetchone()
-    if not row:
-        print(f"⚠️  No observation for {date}")
-        conn.close()
-        return
-    
-    actual = row[0]
-    
-    # Get all forecasts for this date
-    c.execute('''
-        SELECT model, hours_ahead, temp_max
-        FROM forecasts
-        WHERE target_date = ?
-        ORDER BY hours_ahead DESC, model
-    ''', (date,))
-    
-    print(f"\n📉 Errors for {date} (actual: {actual:.1f}°C)")
-    
-    for model, hours_ahead, forecast in c.fetchall():
-        error = forecast - actual
+        # Save ensemble forecasts
         c.execute('''
-            INSERT OR REPLACE INTO model_bias (model, date, bias, hours_ahead)
-            VALUES (?, ?, ?, ?)
-        ''', (model, date, error, hours_ahead))
+            INSERT INTO forecasts (model, forecast_time, target_date, hours_ahead, temp_max, location)
+            VALUES (?, ?, ?, ?, ?, ?)
+        ''', ('ENSEMBLE_MEDIAN', now, tomorrow, hours_ahead, ensemble_median, location_key))
         
-        print(f"   {hours_ahead:3d}h {model:25s} {forecast:5.1f}°C → error: {error:+5.1f}°C")
+        c.execute('''
+            INSERT INTO forecasts (model, forecast_time, target_date, hours_ahead, temp_max, location)
+            VALUES (?, ?, ?, ?, ?, ?)
+        ''', ('ENSEMBLE_MEAN', now, tomorrow, hours_ahead, ensemble_mean, location_key))
+        
+        print(f"\n📊 Ensemble:")
+        print(f"   Median: {ensemble_median:.1f}°C")
+        print(f"   Mean:   {ensemble_mean:.1f}°C")
+        print(f"   Range:  {min(temps):.1f}°C - {max(temps):.1f}°C")
     
     conn.commit()
     conn.close()
+    
+    print(f"✅ {location['name']} forecasts saved!")
 
 
-def show_statistics(days=7):
-    """Show model performance statistics"""
-    conn = sqlite3.connect('weather_forecasts.db')
-    c = conn.cursor()
+def collect_all_locations(use_parallel=True):
+    """Collect forecasts for all configured locations"""
+    print("=" * 60)
+    print("🌐 MULTI-LOCATION FORECAST COLLECTION")
+    print("=" * 60)
     
-    print(f"\n📊 Model Performance (last {days} days, 24h forecasts)")
-    print("="*70)
+    for location_key in LOCATIONS.keys():
+        try:
+            collect_forecasts_parallel(location_key, use_parallel)
+        except Exception as e:
+            print(f"\n❌ Error collecting {location_key}: {e}")
+            continue
     
-    c.execute('''
-        SELECT 
-            model,
-            COUNT(*) as count,
-            AVG(bias) as mean_error,
-            AVG(ABS(bias)) as mae,
-            SQRT(AVG(bias * bias)) as rmse
-        FROM model_bias
-        WHERE date >= date('now', '-' || ? || ' days')
-          AND hours_ahead BETWEEN 20 AND 28
-        GROUP BY model
-        ORDER BY mae ASC
-    ''', (days,))
-    
-    print(f"{'Model':<25} {'Count':>6} {'Mean Error':>12} {'MAE':>8} {'RMSE':>8}")
-    print("-"*70)
-    
-    for model, count, mean_error, mae, rmse in c.fetchall():
-        print(f"{model:<25} {count:>6} {mean_error:>+11.2f}°C {mae:>7.2f}° {rmse:>7.2f}°")
-    
-    conn.close()
+    print("\n" + "=" * 60)
+    print("✅ All locations processed!")
+    print("=" * 60)
 
 
-def main():
-    """Main entry point"""
-    import sys
+def collect_observation(location_key='warsaw'):
+    """Collect actual observation for yesterday"""
+    location = LOCATIONS[location_key]
+    print(f"\n🌡️  Collecting observation for {location['name']}, {location['country']}")
     
-    init_db()
+    yesterday = datetime.now().date() - timedelta(days=1)
+    print(f"📅 Date: {yesterday}")
     
-    if len(sys.argv) > 1:
-        command = sys.argv[1]
+    actual_temp = fetch_actual_temp(yesterday, location_key)
+    
+    if actual_temp is not None:
+        conn = sqlite3.connect('weather_forecasts.db')
+        c = conn.cursor()
         
-        if command == "forecast":
-            count = collect_forecasts()
-            print(f"\n✅ Collected {count} forecasts")
-        
-        elif command == "observe":
-            collect_observation()
-        
-        elif command == "stats":
-            days = int(sys.argv[2]) if len(sys.argv) > 2 else 7
-            show_statistics(days)
-        
-        elif command == "both":
-            # Typical daily run: collect observation for yesterday, forecast for tomorrow
-            collect_observation()
-            collect_forecasts()
-        
-        else:
-            print("Usage: weather_tracker.py [forecast|observe|both|stats]")
-            sys.exit(1)
+        try:
+            c.execute('''
+                INSERT INTO observations (date, temp_max, location)
+                VALUES (?, ?, ?)
+            ''', (yesterday, actual_temp, location_key))
+            conn.commit()
+            print(f"✅ {location['name']}: {actual_temp:.1f}°C recorded")
+        except sqlite3.IntegrityError:
+            print(f"⚠️  {location['name']}: Observation for {yesterday} already exists")
+        finally:
+            conn.close()
     else:
-        # Default: both
-        collect_observation()
-        collect_forecasts()
+        print(f"❌ {location['name']}: Failed to fetch observation")
+
+
+def collect_all_observations():
+    """Collect observations for all locations"""
+    print("=" * 60)
+    print("🌡️  MULTI-LOCATION OBSERVATION COLLECTION")
+    print("=" * 60)
+    
+    for location_key in LOCATIONS.keys():
+        try:
+            collect_observation(location_key)
+        except Exception as e:
+            print(f"\n❌ Error collecting observation for {location_key}: {e}")
+            continue
+    
+    print("\n" + "=" * 60)
+    print("✅ All observations processed!")
+    print("=" * 60)
 
 
 if __name__ == "__main__":
-    main()
+    parser = argparse.ArgumentParser(description='Weather Forecast Tracker')
+    parser.add_argument('action', choices=['forecast', 'observe', 'forecast-all', 'observe-all'], 
+                       help='Action to perform')
+    parser.add_argument('--location', choices=list(LOCATIONS.keys()), default='warsaw',
+                       help='Location to collect data for (default: warsaw)')
+    parser.add_argument('--no-parallel', action='store_true',
+                       help='Disable parallel API requests')
+    
+    args = parser.parse_args()
+    
+    init_db()
+    
+    if args.action == 'forecast':
+        collect_forecasts_parallel(args.location, use_parallel=not args.no_parallel)
+    elif args.action == 'observe':
+        collect_observation(args.location)
+    elif args.action == 'forecast-all':
+        collect_all_locations(use_parallel=not args.no_parallel)
+    elif args.action == 'observe-all':
+        collect_all_observations()

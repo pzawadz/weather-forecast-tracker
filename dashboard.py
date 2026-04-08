@@ -29,12 +29,32 @@ def load_data(query, params=()):
     df = pd.read_sql_query(query, conn, params=params)
     return df
 
+# Location configurations (must match weather_tracker.py)
+LOCATIONS = {
+    'warsaw': {'name': 'Warsaw', 'country': 'Poland', 'flag': '🇵🇱'},
+    'paris': {'name': 'Paris', 'country': 'France', 'flag': '🇫🇷'},
+    'munich': {'name': 'Munich', 'country': 'Germany', 'flag': '🇩🇪'},
+    'london': {'name': 'London', 'country': 'UK', 'flag': '🇬🇧'}
+}
+
 # Header
 st.title("🌤️ Weather Forecast Tracker")
-st.markdown("Multi-model ensemble forecasting for Warsaw")
+st.markdown("Multi-model ensemble forecasting across Europe")
 
 # Sidebar
 st.sidebar.header("Settings")
+
+# Location selector
+location_key = st.sidebar.selectbox(
+    "📍 Location",
+    options=list(LOCATIONS.keys()),
+    format_func=lambda x: f"{LOCATIONS[x]['flag']} {LOCATIONS[x]['name']}, {LOCATIONS[x]['country']}",
+    index=0
+)
+location_info = LOCATIONS[location_key]
+
+st.sidebar.markdown(f"**Selected:** {location_info['flag']} {location_info['name']}")
+
 days_back = st.sidebar.slider("History (days)", 1, 30, 7)
 show_raw = st.sidebar.checkbox("Show individual models", value=True)
 
@@ -48,10 +68,11 @@ query = """
 SELECT model, temp_max, forecast_time, hours_ahead
 FROM forecasts
 WHERE target_date = ?
-  AND forecast_time = (SELECT MAX(forecast_time) FROM forecasts WHERE target_date = ?)
+  AND location = ?
+  AND forecast_time = (SELECT MAX(forecast_time) FROM forecasts WHERE target_date = ? AND location = ?)
 ORDER BY model
 """
-current_forecast = load_data(query, (tomorrow, tomorrow))
+current_forecast = load_data(query, (tomorrow, location_key, tomorrow, location_key))
 
 if not current_forecast.empty:
     # Calculate ensemble
@@ -140,12 +161,13 @@ SELECT
     SQRT(AVG(bias * bias)) as rmse,
     AVG(bias) as mean_error
 FROM model_bias
-WHERE date >= date('now', '-' || ? || ' days')
+WHERE location = ?
+  AND date >= date('now', '-' || ? || ' days')
   AND hours_ahead BETWEEN 20 AND 28
 GROUP BY model
 ORDER BY mae ASC
 """
-performance = load_data(query, (days_back,))
+performance = load_data(query, (location_key, days_back))
 
 if not performance.empty:
     col1, col2 = st.columns(2)
@@ -200,12 +222,13 @@ SELECT
     ABS(AVG(CASE WHEN f.model NOT LIKE 'ENSEMBLE%' THEN f.temp_max END) - o.temp_max) as error,
     COUNT(DISTINCT CASE WHEN f.model NOT LIKE 'ENSEMBLE%' THEN f.model END) as model_count
 FROM observations o
-LEFT JOIN forecasts f ON f.target_date = o.date
-WHERE o.date >= date('now', '-' || ? || ' days')
+LEFT JOIN forecasts f ON f.target_date = o.date AND f.location = o.location
+WHERE o.location = ?
+  AND o.date >= date('now', '-' || ? || ' days')
 GROUP BY o.date
 ORDER BY o.date ASC
 """
-accuracy_data = load_data(query_accuracy, (days_back,))
+accuracy_data = load_data(query_accuracy, (location_key, days_back))
 
 if not accuracy_data.empty and len(accuracy_data) > 0:
     # Calculate MAE
@@ -272,12 +295,13 @@ if not accuracy_data.empty and len(accuracy_data) > 0:
         o.date,
         ABS(f.temp_max - o.temp_max) as error
     FROM forecasts f
-    JOIN observations o ON f.target_date = o.date
-    WHERE f.model NOT LIKE 'ENSEMBLE%'
+    JOIN observations o ON f.target_date = o.date AND f.location = o.location
+    WHERE f.location = ?
+      AND f.model NOT LIKE 'ENSEMBLE%'
       AND o.date >= date('now', '-' || ? || ' days')
     ORDER BY o.date, f.model
     """
-    model_accuracy = load_data(query_models, (days_back,))
+    model_accuracy = load_data(query_models, (location_key, days_back))
     
     if not model_accuracy.empty:
         fig = px.line(
@@ -306,10 +330,11 @@ st.markdown("Track how forecasts converge as we approach the target date")
 available_dates_query = """
 SELECT DISTINCT target_date 
 FROM forecasts 
-WHERE target_date >= date('now', '-' || ? || ' days')
+WHERE location = ?
+  AND target_date >= date('now', '-' || ? || ' days')
 ORDER BY target_date DESC
 """
-available_dates = load_data(available_dates_query, (days_back,))
+available_dates = load_data(available_dates_query, (location_key, days_back))
 
 if not available_dates.empty:
     selected_date = st.selectbox(
@@ -326,15 +351,16 @@ if not available_dates.empty:
         model,
         temp_max
     FROM forecasts
-    WHERE target_date = ?
+    WHERE location = ?
+      AND target_date = ?
     ORDER BY forecast_time DESC, model
     """
-    evolution = load_data(query, (selected_date,))
+    evolution = load_data(query, (location_key, selected_date))
     
     if not evolution.empty:
         # Get actual observation if available
-        obs_query = "SELECT temp_max FROM observations WHERE date = ?"
-        obs = load_data(obs_query, (selected_date,))
+        obs_query = "SELECT temp_max FROM observations WHERE location = ? AND date = ?"
+        obs = load_data(obs_query, (location_key, selected_date))
         actual = obs['temp_max'].iloc[0] if not obs.empty else None
         
         # Calculate convergence metrics
@@ -481,10 +507,11 @@ st.header("🌡️ Recent Observations")
 query = """
 SELECT date, temp_max, created_at
 FROM observations
+WHERE location = ?
 ORDER BY date DESC
 LIMIT 14
 """
-observations = load_data(query)
+observations = load_data(query, (location_key,))
 
 if not observations.empty:
     # Plot observations
@@ -537,11 +564,12 @@ SELECT
     AVG(CASE WHEN f.model NOT LIKE 'ENSEMBLE%' THEN f.temp_max END) as forecast_avg,
     ABS(AVG(CASE WHEN f.model NOT LIKE 'ENSEMBLE%' THEN f.temp_max END) - o.temp_max) as error
 FROM observations o
-LEFT JOIN forecasts f ON f.target_date = o.date
-WHERE o.date >= date('now', '-' || ? || ' days')
+LEFT JOIN forecasts f ON f.target_date = o.date AND f.location = o.location
+WHERE o.location = ?
+  AND o.date >= date('now', '-' || ? || ' days')
 GROUP BY o.date
 """
-temp_patterns = load_data(query_temp_patterns, (days_back,))
+temp_patterns = load_data(query_temp_patterns, (location_key, days_back))
 
 if not temp_patterns.empty and len(temp_patterns) > 0:
     # Add temperature classification
