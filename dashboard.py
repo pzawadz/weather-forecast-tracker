@@ -296,6 +296,7 @@ else:
 
 # Forecast Evolution
 st.header("🔄 Forecast Evolution")
+st.markdown("Track how forecasts converge as we approach the target date")
 
 # Select date
 available_dates_query = """
@@ -332,32 +333,126 @@ if not available_dates.empty:
         obs = load_data(obs_query, (selected_date,))
         actual = obs['temp_max'].iloc[0] if not obs.empty else None
         
-        # Plot evolution
+        # Calculate convergence metrics
+        evolution_models = evolution[~evolution['model'].str.contains('ENSEMBLE')]
+        if not evolution_models.empty:
+            # Group by forecast_time to calculate spread over time
+            convergence = evolution_models.groupby('hours_ahead').agg({
+                'temp_max': ['mean', 'std', 'min', 'max', 'count']
+            }).reset_index()
+            convergence.columns = ['hours_ahead', 'mean', 'std', 'min', 'max', 'count']
+            convergence['spread'] = convergence['max'] - convergence['min']
+            
+            # Metrics
+            col1, col2, col3, col4 = st.columns(4)
+            
+            latest_spread = convergence.iloc[0]['spread'] if len(convergence) > 0 else 0
+            earliest_spread = convergence.iloc[-1]['spread'] if len(convergence) > 0 else 0
+            
+            col1.metric("Latest Spread", f"{latest_spread:.1f}°C",
+                       delta=f"{latest_spread - earliest_spread:+.1f}°C")
+            col2.metric("Latest Uncertainty", f"±{convergence.iloc[0]['std']:.1f}°C")
+            col3.metric("Forecast Updates", len(convergence))
+            if actual is not None:
+                final_error = abs(convergence.iloc[0]['mean'] - actual)
+                col4.metric("Final Error", f"{final_error:.2f}°C",
+                           delta="Excellent" if final_error < 1.0 else "Good" if final_error < 2.0 else "Poor")
+            else:
+                col4.metric("Actual", "Pending")
+        
+        # Main evolution chart
+        st.subheader("Forecast Convergence")
+        
         fig = go.Figure()
         
-        for model in evolution['model'].unique():
+        # Add individual models as thin lines
+        for model in evolution[~evolution['model'].str.contains('ENSEMBLE')]['model'].unique():
             model_data = evolution[evolution['model'] == model]
             fig.add_trace(go.Scatter(
                 x=model_data['hours_ahead'],
                 y=model_data['temp_max'],
                 mode='lines+markers',
                 name=model,
-                line=dict(width=2 if 'ENSEMBLE' in model else 1)
+                line=dict(width=1),
+                opacity=0.6,
+                marker=dict(size=4)
             ))
         
+        # Add ensemble as thick line
+        ensemble_data = evolution[evolution['model'] == 'ENSEMBLE_CORRECTED']
+        if not ensemble_data.empty:
+            fig.add_trace(go.Scatter(
+                x=ensemble_data['hours_ahead'],
+                y=ensemble_data['temp_max'],
+                mode='lines+markers',
+                name='Ensemble (corrected)',
+                line=dict(width=3, color='blue'),
+                marker=dict(size=8)
+            ))
+        
+        # Add actual temperature if available
         if actual is not None:
-            fig.add_hline(y=actual, line_dash="dash", line_color="green",
-                         annotation_text=f"Actual: {actual:.1f}°C")
+            fig.add_hline(y=actual, line_dash="dash", line_color="green", line_width=2,
+                         annotation_text=f"Actual: {actual:.1f}°C",
+                         annotation_position="right")
+            
+            # Add shaded area showing final uncertainty
+            if not convergence.empty:
+                final_std = convergence.iloc[0]['std']
+                fig.add_hrect(y0=actual-final_std, y1=actual+final_std,
+                             fillcolor="green", opacity=0.1,
+                             annotation_text=f"±{final_std:.1f}°C", annotation_position="left")
         
         fig.update_layout(
-            title=f"Forecast Evolution for {selected_date}",
             xaxis_title="Hours Before Target Date",
             yaxis_title="Temperature (°C)",
             height=500,
-            xaxis=dict(autorange="reversed")  # More recent on right
+            xaxis=dict(autorange="reversed"),  # More recent on right
+            hovermode='x unified',
+            legend=dict(yanchor="top", y=0.99, xanchor="left", x=0.01)
         )
         
         st.plotly_chart(fig, use_container_width=True)
+        
+        # Uncertainty evolution chart
+        if not convergence.empty:
+            st.subheader("Uncertainty Over Time")
+            
+            fig2 = go.Figure()
+            
+            fig2.add_trace(go.Scatter(
+                x=convergence['hours_ahead'],
+                y=convergence['std'],
+                mode='lines+markers',
+                name='Standard Deviation',
+                line=dict(color='orange', width=2),
+                fill='tozeroy',
+                fillcolor='rgba(255,165,0,0.2)'
+            ))
+            
+            fig2.add_trace(go.Scatter(
+                x=convergence['hours_ahead'],
+                y=convergence['spread'],
+                mode='lines+markers',
+                name='Model Spread (max-min)',
+                line=dict(color='red', width=2, dash='dash')
+            ))
+            
+            fig2.update_layout(
+                xaxis_title="Hours Before Target Date",
+                yaxis_title="Uncertainty (°C)",
+                height=300,
+                xaxis=dict(autorange="reversed"),
+                hovermode='x unified'
+            )
+            
+            st.plotly_chart(fig2, use_container_width=True)
+            
+            # Insights
+            if convergence['std'].iloc[0] < convergence['std'].iloc[-1]:
+                st.success("✓ Forecast uncertainty decreased over time (models converging)")
+            else:
+                st.warning("⚠ Forecast uncertainty increased (models diverging)")
         
         # Show actual error if available
         if actual is not None:
