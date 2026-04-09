@@ -1,0 +1,109 @@
+#!/usr/bin/env python3
+"""
+IMGW HYBRID Integration Patch
+Add Polish native model to weather_tracker.py
+"""
+
+# Add after MODELS list (around line 49)
+IMGW_PATCH_1 = '''
+# IMGW API configuration (Polish native model)
+IMGW_API_URL = "https://meteo.imgw.pl/api/v1/forecast/fcapi"
+IMGW_TOKEN = "p4DXKjsYadfBV21TYrDk"
+
+# Location-specific models (IMGW only works for Poland)
+LOCATION_SPECIFIC_MODELS = {
+    'warsaw': ['imgw_hybrid'],  # Polish HYBRID model (UM + AROME 2.5-4km)
+    'paris': [],
+    'munich': [],
+    'london': []
+}
+'''
+
+# Add after fetch_actual_temp function (around line 230)
+IMGW_PATCH_2 = '''
+def _fetch_imgw_forecast_single(target_date, location_key):
+    """Single attempt to fetch IMGW HYBRID forecast (used by retry wrapper)"""
+    location = LOCATIONS[location_key]
+    
+    params = {
+        'token': IMGW_TOKEN,
+        'lat': location['lat'],
+        'lon': location['lon'],
+        'm': 'hybrid'  # HYBRID = UM + AROME combined
+    }
+    
+    response = requests.get(IMGW_API_URL, params=params, timeout=10)
+    response.raise_for_status()
+    data = response.json()
+    
+    # Extract tomorrow's forecast from Daily_Data
+    if 'data' in data and 'Daily_Data' in data['data']:
+        daily_data = data['data']['Daily_Data']
+        
+        # Find tomorrow's entry
+        tomorrow_str = target_date.strftime('%Y-%m-%d')
+        for day in daily_data:
+            date_str = day.get('Date', '')
+            if date_str.startswith(tomorrow_str):
+                # Temperature is in Kelvin, convert to Celsius
+                temp_k = float(day['Temp_Max'])
+                temp_c = temp_k - 273.15
+                return temp_c
+        
+        raise ValueError(f"No data for {target_date} in IMGW response")
+    else:
+        raise ValueError("Invalid IMGW API response structure")
+
+
+def fetch_imgw_forecast(target_date, location_key='warsaw'):
+    """Fetch tomorrow's max temp from IMGW HYBRID model (with retry)"""
+    try:
+        temp_max = retry_with_backoff(_fetch_imgw_forecast_single, target_date, location_key)
+        return temp_max
+    except Exception as e:
+        error_msg = str(e)
+        if len(error_msg) > 100:
+            error_msg = error_msg[:97] + "..."
+        print(f"❌ imgw_hybrid: {error_msg}")
+        return None
+'''
+
+# Modify collect_forecasts_parallel to include IMGW
+IMGW_PATCH_3_INSTRUCTIONS = '''
+In collect_forecasts_parallel() function:
+
+1. After line "results = {}" add:
+    # Get models for this location (Open-Meteo + location-specific)
+    location_models = MODELS + LOCATION_SPECIFIC_MODELS.get(location_key, [])
+
+2. Replace "for model in MODELS" with "for model in location_models"
+
+3. In parallel execution, replace:
+    future_to_model = {
+        executor.submit(fetch_forecast, model, tomorrow, location_key): model 
+        for model in MODELS
+    }
+    
+    With:
+    future_to_model = {}
+    for model in location_models:
+        if model == 'imgw_hybrid':
+            future_to_model[executor.submit(fetch_imgw_forecast, tomorrow, location_key)] = model
+        else:
+            future_to_model[executor.submit(fetch_forecast, model, tomorrow, location_key)] = model
+
+4. In sequential execution (else block), replace fetch_forecast call:
+    if model == 'imgw_hybrid':
+        temp_max = fetch_imgw_forecast(tomorrow, location_key)
+    else:
+        temp_max = fetch_forecast(model, tomorrow, location_key)
+'''
+
+print("IMGW Integration Patch Instructions")
+print("=" * 60)
+print("\nPatch 1: Add after MODELS list")
+print(IMGW_PATCH_1)
+print("\nPatch 2: Add after fetch_actual_temp function")
+print(IMGW_PATCH_2)
+print("\nPatch 3: Modify collect_forecasts_parallel")
+print(IMGW_PATCH_3_INSTRUCTIONS)

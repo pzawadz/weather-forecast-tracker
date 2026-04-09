@@ -64,7 +64,7 @@ Automated trading bot for temperature-based prediction markets using weather for
 
 ### 📐 Architecture
 
-**[Complete Microservices Architecture](POLYMARKET_ARCHITECTURE.md)** (20KB detailed plan)
+**[Complete Microservices Architecture](docs/polymarket/POLYMARKET_ARCHITECTURE.md)** (20KB detailed plan)
 
 9 independent services:
 1. **Discovery Service** - Find temperature markets
@@ -193,20 +193,28 @@ weather-forecast-tracker/
 │   ├── client.py                # CLOB API client
 │   └── __init__.py
 ├── docs/
-│   ├── POLYMARKET.md            # Initial research (14KB)
-│   ├── POLYMARKET_ARCHITECTURE.md  # Full architecture (20KB) ⭐
-│   ├── ARCHITECTURE.md          # Weather system architecture
-│   ├── BETTING_PERFORMANCE_GUIDE.md
-│   ├── MULTILOCATION_DEPLOYMENT.md
-│   ├── SMART_OBSERVATION.md
-│   ├── IMGW_DEPLOYMENT.md
-│   └── ROADMAP.md
+│   ├── polymarket/
+│   │   ├── POLYMARKET.md        # Initial research (14KB)
+│   │   ├── POLYMARKET_ARCHITECTURE.md  # Full architecture (20KB) ⭐
+│   │   ├── BETTING_GUIDE.md
+│   │   └── BETTING_PERFORMANCE_GUIDE.md
+│   ├── weather/
+│   │   ├── ARCHITECTURE.md      # Weather system architecture
+│   │   ├── MULTILOCATION_DEPLOYMENT.md
+│   │   ├── SMART_OBSERVATION.md
+│   │   ├── IMGW_DEPLOYMENT.md
+│   │   └── [+ 6 more docs]
+│   └── deployment/
+│       ├── PRODUCTION.md
+│       ├── QUICKSTART.md
+│       └── [+ 3 more docs]
 ├── infra/
 │   └── cloudformation-dashboard-eu.yaml
 ├── logs/
 │   ├── forecast.log
 │   └── observe.log
 ├── weather_forecasts.db         # SQLite database
+├── ROADMAP.md
 └── README.md                    # This file
 ```
 
@@ -372,7 +380,7 @@ MIT License - See LICENSE file for details
 
 - **Dashboard:** https://d2175rmfwid55c.cloudfront.net
 - **GitHub:** https://github.com/pzawadz/weather-forecast-tracker
-- **Architecture:** [POLYMARKET_ARCHITECTURE.md](POLYMARKET_ARCHITECTURE.md)
+- **Architecture:** [docs/polymarket/POLYMARKET_ARCHITECTURE.md](docs/polymarket/POLYMARKET_ARCHITECTURE.md)
 - **Roadmap:** [ROADMAP.md](ROADMAP.md)
 
 ---

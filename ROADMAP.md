@@ -302,7 +302,7 @@ Auto-place bets on Polymarket:
 **Resume:** June 2026 (summer heat wave betting season)
 
 ### Architecture Complete:
-✅ **[Full Microservices Architecture](POLYMARKET_ARCHITECTURE.md)** - 20KB detailed plan  
+✅ **[Full Microservices Architecture](docs/polymarket/POLYMARKET_ARCHITECTURE.md)** - 20KB detailed plan  
 ✅ 9 independent services designed (Discovery, Strategy, Trading, Risk, Monitoring, WebSocket, Relayer, Data Persistence, Orchestrator)  
 ✅ Two-level auth (EIP-712 + HMAC-SHA256)  
 ✅ Geographic restriction addressed (AWS us-east-1 deployment)  
@@ -311,8 +311,8 @@ Auto-place bets on Polymarket:
 ✅ Monitoring stack (Prometheus + Grafana)  
 
 ### What's Ready:
-- ✅ `POLYMARKET.md` - Initial research & basic plan (14KB)
-- ✅ `POLYMARKET_ARCHITECTURE.md` - **Complete microservices architecture** (20KB)
+- ✅ `docs/polymarket/POLYMARKET.md` - Initial research & basic plan (14KB)
+- ✅ `docs/polymarket/POLYMARKET_ARCHITECTURE.md` - **Complete microservices architecture** (20KB)
 - ✅ `polymarket/client.py` - Read-only API client (Phase 1)
 - ✅ Research complete - API tested, endpoints documented
 
@@ -363,8 +363,8 @@ Cost: ~$120/month AWS infrastructure
 4. Scale to live trading if profitable
 
 **Files:**
-- `POLYMARKET.md` - Initial plan & research
-- **`POLYMARKET_ARCHITECTURE.md`** - **Complete architecture** ⭐
+- `docs/polymarket/POLYMARKET.md` - Initial plan & research
+- **`docs/polymarket/POLYMARKET_ARCHITECTURE.md`** - **Complete architecture** ⭐
 - `polymarket/` - Module skeleton (Phase 1 partial)
 
 **Timeline:** Resume in ~8 weeks when season starts 🔥
