@@ -29,7 +29,9 @@ def get_connection():
 @st.cache_data(ttl=300)  # Cache for 5 minutes
 def load_data(query, params=()):
     """Load data from database with caching"""
-    conn = get_connection()
+    # Create fresh connection for each query (don't use cached one)
+    conn = sqlite3.connect('weather_forecasts.db')
+    conn.execute('PRAGMA busy_timeout = 5000')
     df = pd.read_sql_query(query, conn, params=params)
     conn.close()
     return df
