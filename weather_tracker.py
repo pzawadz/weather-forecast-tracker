@@ -63,6 +63,18 @@ MODELS = [
     "gem_global",            # GEM Global
 ]
 
+# IMGW API configuration (Polish native model)
+IMGW_API_URL = "https://meteo.imgw.pl/api/v1/forecast/fcapi"
+IMGW_TOKEN = "p4DXKjsYadfBV21TYrDk"
+
+# Location-specific models (IMGW only works for Poland)
+LOCATION_SPECIFIC_MODELS = {
+    'warsaw': ['imgw_hybrid'],  # Polish HYBRID model (UM + AROME 2.5-4km)
+    'paris': [],
+    'munich': [],
+    'london': []
+}
+
 # Retry configuration
 MAX_RETRIES = 3
 RETRY_DELAYS = [5, 15, 30]  # seconds (exponential backoff)
@@ -140,9 +152,18 @@ def init_db():
         )
     ''')
     
+    # Performance indexes (critical for dashboard queries)
+    print("✓ Creating indexes...")
+    c.execute('CREATE INDEX IF NOT EXISTS idx_forecasts_target ON forecasts(target_date, location)')
+    c.execute('CREATE INDEX IF NOT EXISTS idx_forecasts_model ON forecasts(model, forecast_time)')
+    c.execute('CREATE INDEX IF NOT EXISTS idx_forecasts_location ON forecasts(location, target_date)')
+    c.execute('CREATE INDEX IF NOT EXISTS idx_observations_date ON observations(date, location)')
+    c.execute('CREATE INDEX IF NOT EXISTS idx_bias_date ON model_bias(date, hours_ahead)')
+    c.execute('CREATE INDEX IF NOT EXISTS idx_bias_model ON model_bias(model, location, date)')
+    
     conn.commit()
     conn.close()
-    print("✓ Database initialized")
+    print("✓ Database initialized with indexes")
 
 
 def _fetch_forecast_single(model, target_date, location_key):
@@ -219,6 +240,55 @@ def fetch_actual_temp(date, location_key='warsaw'):
         return None
 
 
+def _fetch_imgw_forecast_single(target_date, location_key):
+    """Single attempt to fetch IMGW HYBRID forecast (used by retry wrapper)"""
+    location = LOCATIONS[location_key]
+    
+    params = {
+        'token': IMGW_TOKEN,
+        'lat': location['lat'],
+        'lon': location['lon'],
+        'm': 'hybrid'  # HYBRID = UM + AROME combined
+    }
+    
+    response = requests.get(IMGW_API_URL, params=params, timeout=10)
+    response.raise_for_status()
+    data = response.json()
+    
+    # Extract tomorrow's forecast from Day_Night_Data (more granular than Daily_Data)
+    if 'data' in data and 'Day_Night_Data' in data['data']:
+        day_night_data = data['data']['Day_Night_Data']
+        
+        # Find tomorrow's DAY entry (isDay=True)
+        tomorrow_str = target_date.strftime('%Y-%m-%d')
+        for entry in day_night_data:
+            date_str = entry.get('Date', '')
+            is_day = entry.get('isDay', False)
+            
+            if date_str.startswith(tomorrow_str) and is_day:
+                # Temperature is in Kelvin, convert to Celsius
+                temp_k = float(entry['Temp_Max'])
+                temp_c = temp_k - 273.15
+                return temp_c
+        
+        raise ValueError(f"No day data for {target_date} in IMGW response")
+    else:
+        raise ValueError("Invalid IMGW API response structure")
+
+
+def fetch_imgw_forecast(target_date, location_key='warsaw'):
+    """Fetch tomorrow's max temp from IMGW HYBRID model (with retry)"""
+    try:
+        temp_max = retry_with_backoff(_fetch_imgw_forecast_single, target_date, location_key)
+        return temp_max
+    except Exception as e:
+        error_msg = str(e)
+        if len(error_msg) > 100:
+            error_msg = error_msg[:97] + "..."
+        print(f"❌ imgw_hybrid: {error_msg}")
+        return None
+
+
 def collect_forecasts_parallel(location_key='warsaw', use_parallel=True):
     """Collect forecasts from all models using parallel requests"""
     location = LOCATIONS[location_key]
@@ -234,17 +304,22 @@ def collect_forecasts_parallel(location_key='warsaw', use_parallel=True):
     conn = sqlite3.connect('weather_forecasts.db')
     c = conn.cursor()
     
+    # Get models for this location (Open-Meteo + location-specific like IMGW)
+    location_models = MODELS + LOCATION_SPECIFIC_MODELS.get(location_key, [])
+    
     results = {}
     start_time = time.time()
     
     if use_parallel:
         # Parallel requests using ThreadPoolExecutor
-        with concurrent.futures.ThreadPoolExecutor(max_workers=6) as executor:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=7) as executor:
             # Submit all tasks
-            future_to_model = {
-                executor.submit(fetch_forecast, model, tomorrow, location_key): model 
-                for model in MODELS
-            }
+            future_to_model = {}
+            for model in location_models:
+                if model == 'imgw_hybrid':
+                    future_to_model[executor.submit(fetch_imgw_forecast, tomorrow, location_key)] = model
+                else:
+                    future_to_model[executor.submit(fetch_forecast, model, tomorrow, location_key)] = model
             
             # Collect results as they complete
             for future in concurrent.futures.as_completed(future_to_model):
@@ -264,8 +339,12 @@ def collect_forecasts_parallel(location_key='warsaw', use_parallel=True):
                     print(f"✗ {model:25s} error: {str(e)[:50]}")
     else:
         # Sequential requests (fallback)
-        for model in MODELS:
-            temp_max = fetch_forecast(model, tomorrow, location_key)
+        for model in location_models:
+            if model == 'imgw_hybrid':
+                temp_max = fetch_imgw_forecast(tomorrow, location_key)
+            else:
+                temp_max = fetch_forecast(model, tomorrow, location_key)
+            
             if temp_max is not None:
                 results[model] = temp_max
                 c.execute('''
@@ -324,32 +403,46 @@ def collect_all_locations(use_parallel=True):
 
 
 def collect_observation(location_key='warsaw'):
-    """Collect actual observation for yesterday"""
+    """Collect actual observation - smart timing"""
     location = LOCATIONS[location_key]
     print(f"\n🌡️  Collecting observation for {location['name']}, {location['country']}")
     
-    yesterday = datetime.now().date() - timedelta(days=1)
-    print(f"📅 Date: {yesterday}")
+    now = datetime.now()
+    dates_to_collect = []
     
-    actual_temp = fetch_actual_temp(yesterday, location_key)
+    # Always collect yesterday (might be missing)
+    yesterday = now.date() - timedelta(days=1)
+    dates_to_collect.append(('yesterday', yesterday))
     
-    if actual_temp is not None:
-        conn = sqlite3.connect('weather_forecasts.db')
-        c = conn.cursor()
+    # If after 18:00 UTC (evening), also collect today
+    # Temperature peak is usually 14-16:00 local, so 18:00 UTC is safe
+    if now.hour >= 18:
+        today = now.date()
+        dates_to_collect.append(('today', today))
+        print(f"⏰ After 18:00 UTC - collecting TODAY + yesterday")
+    
+    conn = sqlite3.connect('weather_forecasts.db')
+    c = conn.cursor()
+    
+    for label, date in dates_to_collect:
+        print(f"📅 {label.capitalize()}: {date}", end=' ')
         
-        try:
-            c.execute('''
-                INSERT INTO observations (date, temp_max, location)
-                VALUES (?, ?, ?)
-            ''', (yesterday, actual_temp, location_key))
-            conn.commit()
-            print(f"✅ {location['name']}: {actual_temp:.1f}°C recorded")
-        except sqlite3.IntegrityError:
-            print(f"⚠️  {location['name']}: Observation for {yesterday} already exists")
-        finally:
-            conn.close()
-    else:
-        print(f"❌ {location['name']}: Failed to fetch observation")
+        actual_temp = fetch_actual_temp(date, location_key)
+        
+        if actual_temp is not None:
+            try:
+                c.execute('''
+                    INSERT INTO observations (date, temp_max, location)
+                    VALUES (?, ?, ?)
+                ''', (date, actual_temp, location_key))
+                conn.commit()
+                print(f"✅ {actual_temp:.1f}°C recorded")
+            except sqlite3.IntegrityError:
+                print(f"⚠️  Already exists ({actual_temp:.1f}°C)")
+        else:
+            print(f"❌ Failed to fetch")
+    
+    conn.close()
 
 
 def collect_all_observations():
