@@ -301,8 +301,18 @@ Auto-place bets on Polymarket:
 **Reason:** No active weather markets in April (shoulder season)  
 **Resume:** June 2026 (summer heat wave betting season)
 
+### Architecture Complete:
+✅ **[Full Microservices Architecture](POLYMARKET_ARCHITECTURE.md)** - 20KB detailed plan  
+✅ 9 independent services designed (Discovery, Strategy, Trading, Risk, Monitoring, WebSocket, Relayer, Data Persistence, Orchestrator)  
+✅ Two-level auth (EIP-712 + HMAC-SHA256)  
+✅ Geographic restriction addressed (AWS us-east-1 deployment)  
+✅ 14-week roadmap to live trading  
+✅ Docker Compose + ECS Fargate deployment  
+✅ Monitoring stack (Prometheus + Grafana)  
+
 ### What's Ready:
-- ✅ `POLYMARKET.md` - Complete architecture & implementation plan
+- ✅ `POLYMARKET.md` - Initial research & basic plan (14KB)
+- ✅ `POLYMARKET_ARCHITECTURE.md` - **Complete microservices architecture** (20KB)
 - ✅ `polymarket/client.py` - Read-only API client (Phase 1)
 - ✅ Research complete - API tested, endpoints documented
 
@@ -314,14 +324,47 @@ Weather betting markets are **seasonal**:
 
 **Current month: April** = No weather markets available on Polymarket
 
+### Critical Discovery:
+🚨 **Poland (PL) has "close-only" status** on Polymarket:
+- ❌ Cannot open NEW positions from Poland
+- ✅ Can close existing positions  
+- ❌ VPN usage prohibited in ToS
+
+**Solution:** Bot will be hosted on **AWS us-east-1** (no geographic restrictions)
+
+### Implementation Plan:
+```
+Phase 1-2: Foundation (4 weeks)
+  - Data Persistence + Discovery services
+  - Strategy + Risk Management services
+
+Phase 3-6: Core Trading (6 weeks)
+  - Trading service (auth + orders)
+  - WebSocket service (real-time)
+  - Relayer service (on-chain ops)
+  - Monitoring service (alerts + metrics)
+
+Phase 7-8: Orchestration + Testing (3 weeks)
+  - Orchestrator/API Gateway
+  - E2E tests + paper trading
+
+Phase 9-10: Deployment + Live (1 week)
+  - Production deployment (AWS ECS)
+  - Live trading with $50-100 capital
+
+Total: ~14 weeks to live trading
+Cost: ~$120/month AWS infrastructure
+```
+
 ### Next Steps (June):
 1. Resume Phase 1 implementation
 2. Find active weather markets (heat waves expected)
-3. Start paper trading
+3. Paper trading (30 days validation)
 4. Scale to live trading if profitable
 
 **Files:**
-- `POLYMARKET.md` - Full plan & architecture
+- `POLYMARKET.md` - Initial plan & research
+- **`POLYMARKET_ARCHITECTURE.md`** - **Complete architecture** ⭐
 - `polymarket/` - Module skeleton (Phase 1 partial)
 
 **Timeline:** Resume in ~8 weeks when season starts 🔥
