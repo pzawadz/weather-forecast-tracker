@@ -292,3 +292,36 @@ Auto-place bets on Polymarket:
 **Recommendation:** Start with Priority 1 & 2 (quick wins) before tackling ML/Polish models.
 
 **Questions?** Ask for specific implementation details on any feature!
+
+---
+
+## ⏸️ ON HOLD: Polymarket Integration
+
+**Status:** ON HOLD (2026-04-09)  
+**Reason:** No active weather markets in April (shoulder season)  
+**Resume:** June 2026 (summer heat wave betting season)
+
+### What's Ready:
+- ✅ `POLYMARKET.md` - Complete architecture & implementation plan
+- ✅ `polymarket/client.py` - Read-only API client (Phase 1)
+- ✅ Research complete - API tested, endpoints documented
+
+### Why Paused:
+Weather betting markets are **seasonal**:
+- 🔥 **Summer (Jun-Aug):** Heat waves, extreme temps → HIGH activity
+- ❄️ **Winter (Dec-Feb):** Snow, cold snaps → MEDIUM activity  
+- 🍂 **Spring/Fall (Mar-May, Sep-Nov):** Stable weather → ZERO markets
+
+**Current month: April** = No weather markets available on Polymarket
+
+### Next Steps (June):
+1. Resume Phase 1 implementation
+2. Find active weather markets (heat waves expected)
+3. Start paper trading
+4. Scale to live trading if profitable
+
+**Files:**
+- `POLYMARKET.md` - Full plan & architecture
+- `polymarket/` - Module skeleton (Phase 1 partial)
+
+**Timeline:** Resume in ~8 weeks when season starts 🔥
