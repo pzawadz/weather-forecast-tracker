@@ -1,0 +1,157 @@
+"""
+Weather connector - orchestrates multiple sources.
+
+Priority:
+1. Tracker DB (if available) — bias-corrected forecasts from weather-forecast-tracker
+2. Open-Meteo ensemble — free, global, multi-model
+3. WeatherAPI.com (fallback) — if Open-Meteo is down
+
+Caches results for 15 minutes (Open-Meteo updates models every 6 hours anyway).
+"""
+
+import os
+from datetime import date, datetime, timedelta
+from typing import Optional, Dict
+import structlog
+
+from bot.connectors.open_meteo import fetch_ensemble_forecast
+from bot.connectors.tracker import TrackerConnector
+from bot.utils.config import Config
+
+logger = structlog.get_logger()
+
+# Simple in-memory cache
+_cache: Dict[str, tuple] = {}
+CACHE_TTL_SECONDS = 900  # 15 minutes
+
+
+class WeatherConnector:
+    """Unified weather forecast connector."""
+    
+    def __init__(self, config: Config):
+        """
+        Initialize weather connector.
+        
+        Args:
+            config: Bot configuration (contains TRACKER_DB_PATH, etc.)
+        """
+        self.config = config
+        
+        # Initialize tracker connector (optional)
+        tracker_path = getattr(config, "TRACKER_DB_PATH", None)
+        self.tracker = TrackerConnector(tracker_path) if tracker_path else None
+        
+        logger.info(
+            "weather_connector_initialized",
+            tracker_available=self.tracker.available if self.tracker else False
+        )
+    
+    def get_forecast(
+        self, 
+        lat: float, 
+        lon: float, 
+        target_date: date,
+        location_key: Optional[str] = None
+    ) -> Optional[Dict]:
+        """
+        Get weather forecast for a location and date.
+        
+        Args:
+            lat: Latitude
+            lon: Longitude
+            target_date: Date to forecast
+            location_key: Optional location key for tracker lookup (e.g., "warsaw")
+        
+        Returns:
+            Dict with:
+            - temp_max_f: forecast max temp (Fahrenheit)
+            - temp_max_c: forecast max temp (Celsius)
+            - sigma_f: forecast uncertainty (Fahrenheit)
+            - sigma_c: forecast uncertainty (Celsius)
+            - source: "tracker" | "open_meteo" | "weatherapi"
+            - model_count: number of models
+            - model_spread_f: spread across models (uncertainty measure)
+            - forecast_time: when forecast was generated
+            
+            None if all sources fail
+        """
+        # Check cache
+        cache_key = f"{lat},{lon},{target_date}"
+        if cache_key in _cache:
+            cached_data, cached_time = _cache[cache_key]
+            if datetime.now() - cached_time < timedelta(seconds=CACHE_TTL_SECONDS):
+                logger.debug("cache_hit", key=cache_key, age_seconds=(datetime.now() - cached_time).seconds)
+                return cached_data
+        
+        # Try tracker first (if available and location_key provided)
+        if self.tracker and self.tracker.available and location_key:
+            tracker_result = self.tracker.fetch_forecast(location_key, target_date)
+            if tracker_result and tracker_result.get("corrected_ensemble_c"):
+                # Use tracker's bias-corrected ensemble
+                # Tracker data is more accurate (has historical bias correction)
+                # Use lower sigma than raw Open-Meteo
+                result = {
+                    "temp_max_f": tracker_result["corrected_ensemble_f"],
+                    "temp_max_c": tracker_result["corrected_ensemble_c"],
+                    "sigma_f": 3.5,  # Lower uncertainty (bias-corrected)
+                    "sigma_c": 2.0,
+                    "source": "tracker",
+                    "model_count": tracker_result["model_count"],
+                    "model_spread_f": 0.0,  # Not computed from tracker
+                    "forecast_time": datetime.now(),
+                }
+                
+                _cache[cache_key] = (result, datetime.now())
+                logger.info(
+                    "forecast_from_tracker",
+                    location=location_key,
+                    date=target_date,
+                    temp_f=round(result["temp_max_f"], 1),
+                    sigma_f=result["sigma_f"]
+                )
+                return result
+        
+        # Fallback to Open-Meteo
+        om_result = fetch_ensemble_forecast(lat, lon, target_date)
+        if om_result:
+            result = {
+                "temp_max_f": om_result["temp_max_f"],
+                "temp_max_c": om_result["temp_max_c"],
+                "sigma_f": om_result["ensemble_sigma_f"],
+                "sigma_c": om_result["ensemble_sigma_c"],
+                "source": "open_meteo",
+                "model_count": om_result["model_count"],
+                "model_spread_f": om_result["model_spread_f"],
+                "forecast_time": datetime.now(),
+            }
+            
+            _cache[cache_key] = (result, datetime.now())
+            logger.info(
+                "forecast_from_open_meteo",
+                lat=lat,
+                lon=lon,
+                date=target_date,
+                temp_f=round(result["temp_max_f"], 1),
+                sigma_f=round(result["sigma_f"], 1),
+                spread_f=round(result["model_spread_f"], 1)
+            )
+            return result
+        
+        # TODO: Add WeatherAPI.com fallback here if needed
+        # For now, if Open-Meteo fails, we return None
+        
+        # If both fail, return None
+        logger.error(
+            "all_forecast_sources_failed",
+            lat=lat,
+            lon=lon,
+            date=target_date,
+            tracker_available=self.tracker.available if self.tracker else False
+        )
+        return None
+    
+    def clear_cache(self):
+        """Clear forecast cache (useful for testing)."""
+        global _cache
+        _cache = {}
+        logger.info("cache_cleared")

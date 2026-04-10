@@ -1,0 +1,467 @@
+"""
+Weather connector - orchestrates multiple sources.
+
+Priority:
+1. Tracker DB (if available) — bias-corrected forecasts from weather-forecast-tracker
+2. Open-Meteo ensemble — free, global, multi-model
+3. WeatherAPI.com (fallback) — if Open-Meteo is down
+
+Caches results for 15 minutes (Open-Meteo updates models every 6 hours anyway).
+"""
+
+import os
+from datetime import date, datetime, timedelta
+from typing import Optional, Dict
+import structlog
+
+from bot.connectors.open_meteo import fetch_ensemble_forecast
+from bot.connectors.tracker import TrackerConnector
+from bot.utils.config import Config
+
+logger = structlog.get_logger()
+
+# Simple in-memory cache
+_cache: Dict[str, tuple] = {}
+CACHE_TTL_SECONDS = 900  # 15 minutes
+
+
+class WeatherConnector:
+    """Unified weather forecast connector."""
+    
+    def __init__(self, config: Config):
+        """
+        Initialize weather connector.
+        
+        Args:
+            config: Bot configuration (contains TRACKER_DB_PATH, etc.)
+        """
+        self.config = config
+        
+        # Initialize tracker connector (optional)
+        tracker_path = getattr(config, "TRACKER_DB_PATH", None)
+        self.tracker = TrackerConnector(tracker_path) if tracker_path else None
+        
+        logger.info(
+            "weather_connector_initialized",
+            tracker_available=self.tracker.available if self.tracker else False
+        )
+    
+    def get_forecast(
+        self, 
+        lat: float, 
+        lon: float, 
+        target_date: date,
+        location_key: Optional[str] = None
+    ) -> Optional[Dict]:
+        """
+        Get weather forecast for a location and date.
+        
+        Args:
+            lat: Latitude
+            lon: Longitude
+            target_date: Date to forecast
+            location_key: Optional location key for tracker lookup (e.g., "warsaw")
+        
+        Returns:
+            Dict with:
+            - temp_max_f: forecast max temp (Fahrenheit)
+            - temp_max_c: forecast max temp (Celsius)
+            - sigma_f: forecast uncertainty (Fahrenheit)
+            - sigma_c: forecast uncertainty (Celsius)
+            - source: "tracker" | "open_meteo" | "weatherapi"
+            - model_count: number of models
+            - model_spread_f: spread across models (uncertainty measure)
+            - forecast_time: when forecast was generated
+            
+            None if all sources fail
+        """
+        # Check cache
+        cache_key = f"{lat},{lon},{target_date}"
+        if cache_key in _cache:
+            cached_data, cached_time = _cache[cache_key]
+            if datetime.now() - cached_time < timedelta(seconds=CACHE_TTL_SECONDS):
+                logger.debug("cache_hit", key=cache_key, age_seconds=(datetime.now() - cached_time).seconds)
+                return cached_data
+        
+        # Try tracker first (if available and location_key provided)
+        if self.tracker and self.tracker.available and location_key:
+            tracker_result = self.tracker.fetch_forecast(location_key, target_date)
+            if tracker_result and tracker_result.get("corrected_ensemble_c"):
+                # Use tracker's bias-corrected ensemble
+                # Tracker data is more accurate (has historical bias correction)
+                # Use lower sigma than raw Open-Meteo
+                result = {
+                    "temp_max_f": tracker_result["corrected_ensemble_f"],
+                    "temp_max_c": tracker_result["corrected_ensemble_c"],
+                    "sigma_f": 3.5,  # Lower uncertainty (bias-corrected)
+                    "sigma_c": 2.0,
+                    "source": "tracker",
+                    "model_count": tracker_result["model_count"],
+                    "model_spread_f": 0.0,  # Not computed from tracker
+                    "forecast_time": datetime.now(),
+                }
+                
+                _cache[cache_key] = (result, datetime.now())
+                logger.info(
+                    "forecast_from_tracker",
+                    location=location_key,
+                    date=target_date,
+                    temp_f=round(result["temp_max_f"], 1),
+                    sigma_f=result["sigma_f"]
+                )
+                return result
+        
+        # Fallback to Open-Meteo
+        om_result = fetch_ensemble_forecast(lat, lon, target_date)
+        if om_result:
+            result = {
+                "temp_max_f": om_result["temp_max_f"],
+                "temp_max_c": om_result["temp_max_c"],
+                "sigma_f": om_result["ensemble_sigma_f"],
+                "sigma_c": om_result["ensemble_sigma_c"],
+                "source": "open_meteo",
+                "model_count": om_result["model_count"],
+                "model_spread_f": om_result["model_spread_f"],
+                "forecast_time": datetime.now(),
+            }
+            
+            _cache[cache_key] = (result, datetime.now())
+            logger.info(
+                "forecast_from_open_meteo",
+                lat=lat,
+                lon=lon,
+                date=target_date,
+                temp_f=round(result["temp_max_f"], 1),
+                sigma_f=round(result["sigma_f"], 1),
+                spread_f=round(result["model_spread_f"], 1)
+            )
+            return result
+        
+        # TODO: Add WeatherAPI.com fallback here if needed
+        # For now, if Open-Meteo fails, we return None
+        
+        # If both fail, return None
+        logger.error(
+            "all_forecast_sources_failed",
+            lat=lat,
+            lon=lon,
+            date=target_date,
+            tracker_available=self.tracker.available if self.tracker else False
+        )
+        return None
+    
+    def clear_cache(self):
+        """Clear forecast cache (useful for testing)."""
+        global _cache
+        _cache = {}
+        logger.info("cache_cleared")
+
+
+    def calculate_probability(
+        self,
+        forecast: Dict,
+        threshold: float,
+        threshold_type: str = "high_temp_f",
+        direction: str = "above"
+    ) -> float:
+        """
+        Calculate probability that threshold will be exceeded or not met.
+        
+        IMPORTANT: Uses dynamic sigma from forecast (not hardcoded).
+        
+        Args:
+            forecast: Forecast dict from get_forecast() with sigma_f/sigma_c
+            threshold: Threshold value (e.g., 70 for 70°F, 20 for 20°C)
+            threshold_type: "high_temp_f", "high_temp_c", "low_temp_f", "low_temp_c"
+            direction: "above" for P(temp > threshold), "below" for P(temp < threshold)
+        
+        Returns:
+            Probability between 0.01 and 0.99
+        """
+        from math import erf, sqrt
+        
+        # Extract temperature and sigma based on type
+        if threshold_type == "high_temp_f":
+            predicted = forecast.get("temp_max_f")
+            sigma = forecast.get("sigma_f", 7.0)  # fallback to 7.0
+        elif threshold_type == "high_temp_c":
+            predicted = forecast.get("temp_max_c")
+            sigma = forecast.get("sigma_c", 3.9)  # fallback to 3.9
+        elif threshold_type == "low_temp_f":
+            # TODO: Add min temp support (need to fetch from Open-Meteo)
+            predicted = forecast.get("temp_max_f")  # fallback to max
+            sigma = forecast.get("sigma_f", 7.0)
+        elif threshold_type == "low_temp_c":
+            predicted = forecast.get("temp_max_c")
+            sigma = forecast.get("sigma_c", 3.9)
+        else:
+            logger.warning(f"Unknown threshold_type: {threshold_type}, defaulting to high_temp_f")
+            predicted = forecast.get("temp_max_f")
+            sigma = forecast.get("sigma_f", 7.0)
+        
+        if predicted is None:
+            logger.warning(f"No predicted temp for {threshold_type}")
+            return 0.5
+        
+        # Calculate P(temp > threshold) using normal CDF
+        # diff = how many degrees above/below threshold
+        # z_score = standardized difference (in units of sigma)
+        diff = predicted - threshold
+        z_score = diff / (sigma * sqrt(2))
+        probability = 0.5 * (1 + erf(z_score))  # P(temp > threshold)
+        
+        # If direction is "below", we want P(temp < threshold)
+        if direction == "below":
+            probability = 1 - probability
+        
+        # Clamp to [0.01, 0.99] (never 100% or 0% certain)
+        probability = max(0.01, min(0.99, probability))
+        
+        logger.debug(
+            f"calculate_probability: predicted={predicted:.1f}, threshold={threshold:.1f}, "
+            f"sigma={sigma:.1f}, diff={diff:.1f}, z={z_score:.2f}, "
+            f"direction={direction}, prob={probability:.1%}"
+        )
+        
+        return probability
+
+
+    def parse_market_question(self, question: str) -> Dict[str, any]:
+        """
+        Parse market question to extract location, threshold, and type.
+        
+        Supports:
+        - European cities: Warsaw, Berlin, London, Paris, etc.
+        - US cities: NYC, LA, Chicago, etc.
+        - Temperature units: Fahrenheit and Celsius
+        - Ranges: "48-49°", "18-20°C"
+        - Thresholds: ">70°F", "<20°C", "above 15°C", "below 50°F"
+        - Dates: "Jan 27, 2026", "2026-04-10", "10 Apr 2026"
+        
+        Returns:
+            Dict with:
+            - location: city name
+            - threshold: temperature value
+            - threshold_type: "high_temp_f" or "high_temp_c"
+            - threshold_direction: "above" or "below"
+            - date: datetime object
+            - range_low, range_high: for range markets
+            - is_range: bool
+            - temp_unit: "F" or "C"
+        """
+        import re
+        from datetime import datetime
+        
+        result = {
+            "location": None,
+            "threshold": None,
+            "threshold_type": None,
+            "threshold_direction": None,
+            "date": None,
+            "range_low": None,
+            "range_high": None,
+            "is_range": False,
+            "temp_unit": None,
+        }
+        
+        question_lower = question.lower()
+        
+        # === 1. Extract location ===
+        # European cities (from config/locations.json)
+        cities = [
+            # Europe
+            "Warsaw", "Warszawa", "Berlin", "London", "Paris",
+            # US
+            "New York", "NYC", "Los Angeles", "LA", "Chicago",
+            "Miami", "Houston", "Phoenix", "Boston", "Seattle",
+            "San Francisco", "SF", "Denver", "Atlanta", "Philadelphia",
+            "Dallas", "San Diego", "Las Vegas", "Portland", "Austin"
+        ]
+        
+        for city in cities:
+            if city.lower() in question_lower:
+                result["location"] = city
+                break
+        
+        # === 2. Detect temperature unit (Celsius or Fahrenheit) ===
+        # Patterns: "°C", "celsius", "°F", "fahrenheit", "degrees C"
+        if re.search(r"°c|celsius|degrees?\s*c\b", question_lower):
+            result["temp_unit"] = "C"
+        elif re.search(r"°f|fahrenheit|degrees?\s*f\b", question_lower):
+            result["temp_unit"] = "F"
+        else:
+            # Default based on location
+            # European cities → Celsius, US cities → Fahrenheit
+            if result["location"] in ["Warsaw", "Warszawa", "Berlin", "London", "Paris"]:
+                result["temp_unit"] = "C"
+            else:
+                result["temp_unit"] = "F"
+        
+        # === 3. Determine high vs low temperature ===
+        if "low" in question_lower or "minimum" in question_lower:
+            result["threshold_type"] = f"low_temp_{result['temp_unit'].lower()}"
+        elif "high" in question_lower or "maximum" in question_lower:
+            result["threshold_type"] = f"high_temp_{result['temp_unit'].lower()}"
+        else:
+            result["threshold_type"] = f"high_temp_{result['temp_unit'].lower()}"  # default
+        
+        # === 4. Extract temperature value ===
+        # Check for RANGE first (e.g., "18-20°C", "48-49°F")
+        range_patterns = [
+            r"(-?\d+)-(-?\d+)°",  # 18-20° or -5-0°
+            r"(-?\d+)°?\s*to\s*(-?\d+)°",  # 18° to 20° or -5° to -3°
+        ]
+        
+        for pattern in range_patterns:
+            match = re.search(pattern, question)
+            if match:
+                result["range_low"] = float(match.group(1))
+                result["range_high"] = float(match.group(2))
+                result["threshold"] = (result["range_low"] + result["range_high"]) / 2
+                result["is_range"] = True
+                break
+        
+        # If no range, check for threshold (>, <, above, below)
+        if not result["is_range"]:
+            threshold_patterns = [
+                (r">\s*(-?\d+)°?", "above"),  # >20° or >-5°
+                (r"<\s*(-?\d+)°?", "below"),  # <15° or <-1°
+                (r"above\s+(-?\d+)", "above"),  # above 20 or above -10
+                (r"below\s+(-?\d+)", "below"),  # below 15 or below -5
+                (r"exceed\s+(-?\d+)", "above"),  # exceed 25
+                (r"(-?\d+)\s*°?[cfCF]", None),  # 20C or 70F
+                (r"(-?\d+)\s*degrees?\s*[cfCF]", None),  # 20 degrees C
+            ]
+            
+            for pattern, direction in threshold_patterns:
+                match = re.search(pattern, question)
+                if match:
+                    result["threshold"] = float(match.group(1))
+                    if direction:
+                        result["threshold_direction"] = direction
+                    break
+        
+        # === 5. Extract date ===
+        # Month map for parsing
+        month_map = {
+            'jan': 1, 'feb': 2, 'mar': 3, 'apr': 4, 'may': 5, 'jun': 6,
+            'jul': 7, 'aug': 8, 'sep': 9, 'oct': 10, 'nov': 11, 'dec': 12
+        }
+        
+        # Try "Jan 27, 2026" format
+        month_date_match = re.search(
+            r"(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)\s+(\d{1,2}),?\s*(\d{4})",
+            question_lower
+        )
+        if month_date_match:
+            try:
+                month = month_map[month_date_match.group(1)]
+                day = int(month_date_match.group(2))
+                year = int(month_date_match.group(3))
+                result["date"] = datetime(year, month, day)
+            except Exception as e:
+                logger.warning(f"Failed to parse month-date format: {e}")
+        
+        # Fallback to other formats
+        if not result["date"]:
+            date_patterns = [
+                r"(\d{1,2})/(\d{1,2})/(\d{4})",  # MM/DD/YYYY
+                r"(\d{4})-(\d{2})-(\d{2})",  # YYYY-MM-DD
+                r"(\d{1,2})\s+(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)\s+(\d{4})",  # 10 Apr 2026
+            ]
+            
+            for pattern in date_patterns:
+                match = re.search(pattern, question_lower if 'jan|feb' in pattern else question)
+                if match:
+                    try:
+                        if "/" in pattern:
+                            # MM/DD/YYYY
+                            month, day, year = match.groups()
+                            result["date"] = datetime(int(year), int(month), int(day))
+                        elif "-" in pattern:
+                            # YYYY-MM-DD
+                            year, month, day = match.groups()
+                            result["date"] = datetime(int(year), int(month), int(day))
+                        else:
+                            # DD MMM YYYY
+                            day, month_str, year = match.groups()
+                            month = month_map.get(month_str, 1)
+                            result["date"] = datetime(int(year), month, int(day))
+                        break
+                    except Exception as e:
+                        logger.warning(f"Failed to parse date format: {e}")
+        
+        logger.debug(
+            f"parse_market_question: location={result['location']}, "
+            f"threshold={result['threshold']}, unit={result['temp_unit']}, "
+            f"type={result['threshold_type']}, date={result['date']}"
+        )
+        
+        return result
+
+
+    def calculate_range_probability(
+        self,
+        forecast: Dict,
+        range_low: float,
+        range_high: float,
+        threshold_type: str = "high_temp_f"
+    ) -> float:
+        """
+        Calculate probability that temperature falls within range.
+        
+        Args:
+            forecast: Forecast dict from get_forecast()
+            range_low: Lower bound (e.g., 18 for 18-20°C)
+            range_high: Upper bound (e.g., 20 for 18-20°C)
+            threshold_type: "high_temp_f", "high_temp_c", etc.
+        
+        Returns:
+            Probability between 0.01 and 0.99
+        """
+        from math import erf, sqrt
+        
+        # Extract temperature and sigma
+        if threshold_type == "high_temp_f":
+            predicted = forecast.get("temp_max_f")
+            sigma = forecast.get("sigma_f", 7.0)
+        elif threshold_type == "high_temp_c":
+            predicted = forecast.get("temp_max_c")
+            sigma = forecast.get("sigma_c", 3.9)
+        elif threshold_type == "low_temp_f":
+            predicted = forecast.get("temp_max_f")  # fallback
+            sigma = forecast.get("sigma_f", 7.0)
+        elif threshold_type == "low_temp_c":
+            predicted = forecast.get("temp_max_c")
+            sigma = forecast.get("sigma_c", 3.9)
+        else:
+            predicted = forecast.get("temp_max_f")
+            sigma = forecast.get("sigma_f", 7.0)
+        
+        if predicted is None:
+            return 0.5
+        
+        # P(range_low < temp < range_high)
+        # = P(temp < range_high) - P(temp < range_low)
+        # = CDF(range_high) - CDF(range_low)
+        
+        def normal_cdf(value):
+            """CDF of normal distribution centered at predicted."""
+            diff = value - predicted
+            z_score = diff / (sigma * sqrt(2))
+            return 0.5 * (1 + erf(z_score))
+        
+        prob_below_high = normal_cdf(range_high)
+        prob_below_low = normal_cdf(range_low)
+        
+        probability = prob_below_high - prob_below_low
+        
+        # Clamp
+        probability = max(0.01, min(0.99, probability))
+        
+        logger.debug(
+            f"calculate_range_probability: predicted={predicted:.1f}, "
+            f"range=[{range_low}, {range_high}], sigma={sigma:.1f}, prob={probability:.1%}"
+        )
+        
+        return probability

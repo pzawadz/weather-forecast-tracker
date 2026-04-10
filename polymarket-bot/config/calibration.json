@@ -1,0 +1,86 @@
+{
+  "version": "1.0.0",
+  "last_updated": "2026-04-09",
+  "notes": "Initial calibration values based on Open-Meteo model accuracy analysis",
+  
+  "regions": {
+    "europe": {
+      "base_sigma_f": 3.5,
+      "base_sigma_c": 2.0,
+      "notes": "European models (ECMWF, ICON) more accurate for EU cities. Lower sigma = higher confidence."
+    },
+    "us": {
+      "base_sigma_f": 5.0,
+      "base_sigma_c": 2.8,
+      "notes": "GFS primary for US, slightly less accurate than ECMWF for short-term. Higher sigma = lower confidence."
+    }
+  },
+  
+  "models": {
+    "ecmwf_ifs025": {
+      "name": "ECMWF IFS",
+      "weight": 2.0,
+      "confidence": 0.92,
+      "notes": "Best global model, 9km resolution, excellent for Europe"
+    },
+    "icon_global": {
+      "name": "DWD ICON",
+      "weight": 1.5,
+      "confidence": 0.88,
+      "notes": "DWD ICON, 13km resolution, excellent for Europe and Central EU"
+    },
+    "gfs_global": {
+      "name": "NOAA GFS",
+      "weight": 1.0,
+      "confidence": 0.85,
+      "notes": "NOAA GFS, 13km resolution, best for US, decent globally"
+    },
+    "meteofrance_arpege_world": {
+      "name": "Meteo France ARPEGE",
+      "weight": 1.0,
+      "confidence": 0.85,
+      "notes": "Meteo France, variable resolution, good for Western Europe"
+    },
+    "gem_global": {
+      "name": "GEM Global",
+      "weight": 1.0,
+      "confidence": 0.83,
+      "notes": "Canadian model, 15km resolution, good global coverage"
+    }
+  },
+  
+  "forecast_horizons": {
+    "1_day": {
+      "typical_error_f": 2.5,
+      "typical_error_c": 1.4,
+      "notes": "Tomorrow forecast - most accurate"
+    },
+    "2_day": {
+      "typical_error_f": 3.5,
+      "typical_error_c": 2.0,
+      "notes": "Day after tomorrow - still good"
+    },
+    "3_day": {
+      "typical_error_f": 4.5,
+      "typical_error_c": 2.5,
+      "notes": "3 days out - moderate uncertainty"
+    },
+    "4_day": {
+      "typical_error_f": 5.5,
+      "typical_error_c": 3.1,
+      "notes": "4 days out - higher uncertainty"
+    },
+    "5_day": {
+      "typical_error_f": 6.5,
+      "typical_error_c": 3.6,
+      "notes": "5 days out - maximum recommended horizon"
+    }
+  },
+  
+  "calibration_schedule": {
+    "frequency": "weekly",
+    "next_calibration": "2026-04-16",
+    "minimum_samples": 30,
+    "notes": "Recalibrate sigma values weekly based on actual vs forecast performance"
+  }
+}

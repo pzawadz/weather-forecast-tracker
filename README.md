@@ -1,10 +1,12 @@
 # Weather Forecast Tracker + Polymarket Bot
 
-**Multi-location weather forecasting system with automated betting capabilities (planned)**
+**Two-component weather prediction system:**
+1. **Weather Forecasting** - Multi-model ensemble forecasts with bias correction (PRODUCTION)
+2. **Polymarket Trading Bot** - Automated weather betting using forecast data (READY FOR TESTING)
 
-[![Production](https://img.shields.io/badge/dashboard-live-brightgreen)](https://d2175rmfwid55c.cloudfront.net)
-[![Status](https://img.shields.io/badge/weather-production-brightgreen)]()
-[![Status](https://img.shields.io/badge/polymarket-planning-yellow)]()
+[![Dashboard](https://img.shields.io/badge/dashboard-live-brightgreen)](https://d2175rmfwid55c.cloudfront.net)
+[![Weather](https://img.shields.io/badge/weather-production-brightgreen)]()
+[![Bot](https://img.shields.io/badge/polymarket_bot-testing-yellow)]()
 
 ---
 
@@ -56,68 +58,78 @@ Features:
 
 ---
 
-## 💰 Polymarket Bot (PLANNED)
+## 💰 Polymarket Bot (READY FOR TESTING)
 
-**Status:** ⏸️ ON HOLD until June 2026 (weather betting season)
+**Status:** ✅ Phases 1-4 complete, simulation ready (2026-04-10)
 
-Automated trading bot for temperature-based prediction markets using weather forecast accuracy.
+Automated trading bot for temperature markets on Polymarket using **global weather forecasts** and **extreme value strategy**.
 
-### 📐 Architecture
+**Location:** [`polymarket-bot/`](polymarket-bot/) subdirectory
 
-**[Complete Microservices Architecture](docs/polymarket/POLYMARKET_ARCHITECTURE.md)** (20KB detailed plan)
+### ✨ Key Features
 
-9 independent services:
-1. **Discovery Service** - Find temperature markets
-2. **Strategy Service** - Edge calculation + Kelly sizing
-3. **Trading Service** - Order placement (EIP-712 + HMAC auth)
-4. **Risk Management** - Position limits + circuit breakers
-5. **Monitoring Service** - Prometheus + Grafana + Telegram alerts
-6. **WebSocket Service** - Real-time orderbook + fills
-7. **Relayer Service** - On-chain operations (split/merge/redeem)
-8. **Data Persistence** - PostgreSQL + Redis
-9. **Orchestrator** - Service discovery + workflow engine
+- **Global coverage:** Warsaw, Berlin, London, Paris, NYC, LA, Chicago, Miami, Houston, Phoenix
+- **Multi-model forecasts:** ECMWF, ICON, GFS, Meteo France, GEM (5 models via Open-Meteo)
+- **Dynamic sigma:** Adapts to model agreement (higher confidence when models agree)
+- **Bias correction:** Optional integration with weather-forecast-tracker DB
+- **Proven strategy:** Extreme value betting (forked from idlepraxis, $25K+ track record)
+- **Risk controls:** Circuit breakers, position limits, simulation mode
 
-### 🚨 Geographic Restriction
-
-**Poland has "close-only" status on Polymarket:**
-- ❌ Cannot open NEW positions from Poland
-- ✅ Can close existing positions
-- ❌ VPN usage prohibited
-
-**Solution:** Bot will be deployed to **AWS us-east-1** (no restrictions)
-
-### 📅 Timeline
+### 🧪 Test Results (2026-04-11)
 
 ```
-Phase 1-2: Foundation (4 weeks)
-Phase 3-6: Core Trading (6 weeks)  
-Phase 7-8: Orchestration + Testing (3 weeks)
-Phase 9-10: Deployment + Live (1 week)
-
-Total: ~14 weeks to live trading
-Cost: ~$120/month AWS infrastructure
+Warsaw: 51.7°F, sigma 4.6°F, P(>50°F) = 64.6% ✅
+Berlin: 13.7°C, sigma 3.1°C, P(18-20°C) = 6.4% ✅
+London: 12.5°C, sigma 3.0°C, P(<15°C) = 79.8% ✅
+NYC: 61.9°F, sigma 6.5°F, P(>60°F) = 61.4% ✅
 ```
 
-### 🔒 Security
+### 🚀 Quick Start
 
-- Two-level auth: EIP-712 + HMAC-SHA256
-- Heartbeat mechanism (60s, critical!)
-- Circuit breakers (daily loss, consecutive losses)
-- Position limits ($10 max bet, $100 max exposure for Phase 3)
-- AWS Secrets Manager for credentials
-- VPC private subnets + NAT Gateway
+```bash
+cd polymarket-bot
+python3 -m venv venv
+source venv/bin/activate
+pip install -r requirements.txt
 
-### 📊 Expected Performance
+# Configure (copy .env.example to .env)
+cp .env.example .env
+nano .env
+
+# Test
+python test_open_meteo.py
+python test_strategy_e2e.py
+
+# Run (simulation mode)
+python bot.py
+```
+
+### 📚 Documentation
+
+- **[polymarket-bot/README.md](polymarket-bot/README.md)** - Complete bot documentation
+- **[polymarket-bot/REFACTOR_SUMMARY.md](polymarket-bot/REFACTOR_SUMMARY.md)** - Phases 1-4 refactoring docs
+- **[polymarket-bot/FORK_NOTES.md](polymarket-bot/FORK_NOTES.md)** - Implementation plan
+- **[docs/polymarket/](docs/polymarket/)** - Original architecture docs (microservices plan)
+
+### 🎯 Strategy
+
+```python
+BUY YES: Price < 12¢ + forecast edge > 5%
+BUY NO: YES price > 50¢ + forecast edge > 5%
+Position: $1.50-$5.00 per trade
+Risk: Circuit breaker at -$50 daily loss
+```
+
+### ⚠️ Status
 
 ```
-Target Win Rate: > 55%
-Target ROI: > 10% per month
-Risk Controls:
-  - Max bet: $10 (Phase 3)
-  - Max daily bets: 3
-  - Max daily loss: $50 (circuit breaker)
-  - Max consecutive losses: 3 (pause trading)
+✅ Phases 1-4 complete (fork, weather, execution, strategy)
+✅ Tests passing (parsing, forecasts, probability)
+🔄 Phase 5-8 TODO (calibration, monitoring, testing)
+⏸️ Live trading ON HOLD until fully tested
 ```
+
+**Next:** Paper trading in simulation mode for 30 days before live deployment.
 
 ---
 

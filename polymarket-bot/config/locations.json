@@ -1,0 +1,92 @@
+{
+  "warsaw": {
+    "name": "Warsaw",
+    "country": "Poland",
+    "lat": 52.2297,
+    "lon": 21.0122,
+    "region": "europe",
+    "timezone": "Europe/Warsaw",
+    "aliases": ["warszawa", "warsaw, poland"]
+  },
+  "berlin": {
+    "name": "Berlin",
+    "country": "Germany",
+    "lat": 52.5200,
+    "lon": 13.4050,
+    "region": "europe",
+    "timezone": "Europe/Berlin",
+    "aliases": ["berlin, germany"]
+  },
+  "london": {
+    "name": "London",
+    "country": "UK",
+    "lat": 51.5074,
+    "lon": -0.1278,
+    "region": "europe",
+    "timezone": "Europe/London",
+    "aliases": ["london, uk", "london, england"]
+  },
+  "paris": {
+    "name": "Paris",
+    "country": "France",
+    "lat": 48.8566,
+    "lon": 2.3522,
+    "region": "europe",
+    "timezone": "Europe/Paris",
+    "aliases": ["paris, france"]
+  },
+  "new_york": {
+    "name": "New York",
+    "country": "USA",
+    "lat": 40.7128,
+    "lon": -74.0060,
+    "region": "us",
+    "timezone": "America/New_York",
+    "aliases": ["new york city", "nyc", "new york, ny"]
+  },
+  "chicago": {
+    "name": "Chicago",
+    "country": "USA",
+    "lat": 41.8781,
+    "lon": -87.6298,
+    "region": "us",
+    "timezone": "America/Chicago",
+    "aliases": ["chicago, il"]
+  },
+  "los_angeles": {
+    "name": "Los Angeles",
+    "country": "USA",
+    "lat": 34.0522,
+    "lon": -118.2437,
+    "region": "us",
+    "timezone": "America/Los_Angeles",
+    "aliases": ["la", "los angeles, ca"]
+  },
+  "miami": {
+    "name": "Miami",
+    "country": "USA",
+    "lat": 25.7617,
+    "lon": -80.1918,
+    "region": "us",
+    "timezone": "America/New_York",
+    "aliases": ["miami, fl"]
+  },
+  "houston": {
+    "name": "Houston",
+    "country": "USA",
+    "lat": 29.7604,
+    "lon": -95.3698,
+    "region": "us",
+    "timezone": "America/Chicago",
+    "aliases": ["houston, tx"]
+  },
+  "phoenix": {
+    "name": "Phoenix",
+    "country": "USA",
+    "lat": 33.4484,
+    "lon": -112.0740,
+    "region": "us",
+    "timezone": "America/Phoenix",
+    "aliases": ["phoenix, az"]
+  }
+}
