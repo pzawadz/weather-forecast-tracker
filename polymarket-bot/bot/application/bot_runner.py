@@ -73,6 +73,8 @@ class BotRunner:
         self.last_resolution_check: Optional[datetime] = None
         self.trades_today = 0
         self.daily_exposure = 0.0
+        self.daily_pnl = 0.0  # Track realized P&L for circuit breaker
+        self.circuit_breaker_triggered = False
         self.start_time: Optional[datetime] = None
 
         # PID file for daemon management
@@ -172,6 +174,8 @@ class BotRunner:
         self.logger.info("Resetting daily counters (new day)")
         self.trades_today = 0
         self.daily_exposure = 0.0
+        self.daily_pnl = 0.0
+        self.circuit_breaker_triggered = False
 
     def _scan_and_trade(self):
         """Scan for opportunities and execute trades."""
@@ -187,6 +191,17 @@ class BotRunner:
             max_exposure = self.bankroll * (self.max_daily_exposure_pct / 100)
             if self.daily_exposure >= max_exposure:
                 self.logger.warning(f"Daily exposure limit reached (${max_exposure:.2f}), skipping scan")
+                return
+            
+            # Check circuit breaker (daily loss limit)
+            circuit_breaker_loss = self.config.circuit_breaker_daily_loss  # e.g., -50.00
+            if self.daily_pnl <= circuit_breaker_loss:
+                if not self.circuit_breaker_triggered:
+                    self.logger.error(
+                        f"🚨 CIRCUIT BREAKER TRIGGERED: daily P&L ${self.daily_pnl:.2f} <= ${circuit_breaker_loss:.2f}"
+                    )
+                    self.logger.error("Trading suspended for today. Will resume tomorrow.")
+                    self.circuit_breaker_triggered = True
                 return
 
             # Fetch markets
@@ -378,6 +393,13 @@ class BotRunner:
                             pnl=pnl,
                             resolution_date=datetime.now(timezone.utc)
                         )
+                        
+                        # Update daily P&L (for circuit breaker)
+                        self.daily_pnl += pnl
+                        self.logger.info(
+                            f"Trade resolved: {'WIN' if won else 'LOSS'} "
+                            f"P&L=${pnl:.2f}, Daily P&L=${self.daily_pnl:.2f}"
+                        )
 
                         resolved_count += 1
 
@@ -442,6 +464,9 @@ class BotRunner:
             'last_scan': self.last_scan_time.isoformat() if self.last_scan_time else None,
             'trades_today': self.trades_today,
             'daily_exposure': self.daily_exposure,
+            'daily_pnl': self.daily_pnl,
+            'circuit_breaker_triggered': self.circuit_breaker_triggered,
+            'circuit_breaker_threshold': self.config.circuit_breaker_daily_loss,
             'bankroll': self.bankroll,
             'pnl': pnl,
             'open_positions': len(open_trades),
