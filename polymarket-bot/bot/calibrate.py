@@ -13,12 +13,17 @@ Usage:
 import json
 import sqlite3
 import sys
+import logging
 from pathlib import Path
 from datetime import datetime, timedelta
 from typing import Dict, Optional
-import structlog
 
-logger = structlog.get_logger()
+# Setup logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s [%(levelname)s] %(message)s'
+)
+logger = logging.getLogger(__name__)
 
 
 class Calibrator:
@@ -42,11 +47,7 @@ class Calibrator:
                 f"Calibration requires weather-forecast-tracker database."
             )
         
-        logger.info(
-            "calibrator_initialized",
-            tracker_db=tracker_db_path,
-            calibration_config=calibration_config_path
-        )
+        logger.info(f"Calibrator initialized: DB={tracker_db_path}")
     
     def analyze_accuracy(
         self,
@@ -57,29 +58,11 @@ class Calibrator:
         """
         Analyze forecast accuracy for a location.
         
-        Args:
-            location: Location key (e.g., "warsaw")
-            days: Number of recent days to analyze
-            min_samples: Minimum number of observations required
-        
-        Returns:
-            Dict with:
-            - mae_f: Mean Absolute Error (Fahrenheit)
-            - mae_c: Mean Absolute Error (Celsius)
-            - bias_f: Mean Bias (Fahrenheit)
-            - bias_c: Mean Bias (Celsius)
-            - std_dev_f: Standard deviation (Fahrenheit)
-            - std_dev_c: Standard deviation (Celsius)
-            - sample_count: Number of observations
-            - recommended_sigma_f: Suggested sigma (Fahrenheit)
-            - recommended_sigma_c: Suggested sigma (Celsius)
-            
-            None if insufficient data
+        Returns dict with MAE, bias, std_dev, recommended_sigma, or None if insufficient data.
         """
         conn = sqlite3.connect(self.tracker_db_path, timeout=5.0)
         
-        # Get forecast errors for recent period
-        # Only use 24h ahead forecasts (standard betting window)
+        # Get forecast errors for recent period (24h ahead forecasts)
         cutoff_date = (datetime.now() - timedelta(days=days)).date()
         
         query = """
@@ -98,12 +81,7 @@ class Calibrator:
         conn.close()
         
         if len(results) < min_samples:
-            logger.warning(
-                "insufficient_samples",
-                location=location,
-                samples=len(results),
-                required=min_samples
-            )
+            logger.warning(f"{location}: insufficient samples ({len(results)} < {min_samples})")
             return None
         
         # Calculate statistics
@@ -113,7 +91,7 @@ class Calibrator:
         mae_c = sum(abs_errors) / len(abs_errors)
         bias_c = sum(biases) / len(biases)
         
-        # Standard deviation (measure of forecast spread)
+        # Standard deviation
         mean_error = sum(biases) / len(biases)
         variance = sum((e - mean_error) ** 2 for e in biases) / len(biases)
         std_dev_c = variance ** 0.5
@@ -123,24 +101,11 @@ class Calibrator:
         bias_f = bias_c * 1.8
         std_dev_f = std_dev_c * 1.8
         
-        # Recommended sigma = std_dev + safety margin
-        # We want to capture ~68% of errors within 1 sigma
-        # Add 20% safety margin for model spread
-        recommended_sigma_c = std_dev_c * 1.2
-        recommended_sigma_f = std_dev_f * 1.2
+        # Recommended sigma = std_dev + 20% safety margin
+        recommended_sigma_c = max(1.5, std_dev_c * 1.2)
+        recommended_sigma_f = max(2.7, std_dev_f * 1.2)
         
-        # Floor at reasonable minimums
-        recommended_sigma_c = max(1.5, recommended_sigma_c)
-        recommended_sigma_f = max(2.7, recommended_sigma_f)
-        
-        logger.info(
-            "accuracy_analyzed",
-            location=location,
-            sample_count=len(results),
-            mae_c=round(mae_c, 2),
-            std_dev_c=round(std_dev_c, 2),
-            recommended_sigma_c=round(recommended_sigma_c, 2)
-        )
+        logger.info(f"{location}: samples={len(results)}, MAE={mae_c:.2f}°C, σ={recommended_sigma_c:.2f}°C")
         
         return {
             "mae_f": mae_f,
@@ -159,16 +124,7 @@ class Calibrator:
         days: int = 30,
         min_samples: int = 7
     ) -> Dict[str, Dict]:
-        """
-        Calibrate sigma for all locations.
-        
-        Args:
-            days: Number of recent days to analyze
-            min_samples: Minimum observations required
-        
-        Returns:
-            Dict mapping location to accuracy stats
-        """
+        """Calibrate sigma for all locations."""
         # Get all locations from tracker DB
         conn = sqlite3.connect(self.tracker_db_path, timeout=5.0)
         locations = conn.execute(
@@ -177,8 +133,7 @@ class Calibrator:
         conn.close()
         
         locations = [loc[0] for loc in locations]
-        
-        logger.info("calibrating_locations", count=len(locations), locations=locations)
+        logger.info(f"Calibrating {len(locations)} locations: {locations}")
         
         results = {}
         for location in locations:
@@ -187,7 +142,7 @@ class Calibrator:
                 if stats:
                     results[location] = stats
             except Exception as e:
-                logger.error("calibration_failed", location=location, error=str(e))
+                logger.error(f"{location}: calibration failed - {e}")
         
         return results
     
@@ -196,16 +151,7 @@ class Calibrator:
         location_stats: Dict[str, Dict],
         dry_run: bool = False
     ) -> Dict:
-        """
-        Update config/calibration.json with new sigma values.
-        
-        Args:
-            location_stats: Dict from calibrate_all_locations()
-            dry_run: If True, don't actually write file
-        
-        Returns:
-            Updated config dict
-        """
+        """Update config/calibration.json with new sigma values."""
         # Load current config
         with open(self.calibration_config_path) as f:
             config = json.load(f)
@@ -217,7 +163,6 @@ class Calibrator:
         for location, stats in location_stats.items():
             sigma_c = stats["recommended_sigma_c"]
             
-            # Determine region (simple heuristic)
             if location in ["warsaw", "berlin", "london", "paris"]:
                 europe_sigmas.append(sigma_c)
             else:
@@ -232,12 +177,7 @@ class Calibrator:
             config["regions"]["europe"]["base_sigma_c"] = round(avg_sigma_c, 1)
             config["regions"]["europe"]["base_sigma_f"] = round(avg_sigma_f, 1)
             
-            logger.info(
-                "europe_sigma_updated",
-                old=old_sigma,
-                new=round(avg_sigma_c, 1),
-                sample_count=len(europe_sigmas)
-            )
+            logger.info(f"Europe sigma: {old_sigma}°C → {round(avg_sigma_c, 1)}°C ({len(europe_sigmas)} locations)")
         
         if us_sigmas:
             avg_sigma_c = sum(us_sigmas) / len(us_sigmas)
@@ -247,18 +187,13 @@ class Calibrator:
             config["regions"]["us"]["base_sigma_c"] = round(avg_sigma_c, 1)
             config["regions"]["us"]["base_sigma_f"] = round(avg_sigma_f, 1)
             
-            logger.info(
-                "us_sigma_updated",
-                old=old_sigma,
-                new=round(avg_sigma_c, 1),
-                sample_count=len(us_sigmas)
-            )
+            logger.info(f"US sigma: {old_sigma}°C → {round(avg_sigma_c, 1)}°C ({len(us_sigmas)} locations)")
         
         # Update metadata
         config["version"] = f"{config['version']}.{datetime.now().strftime('%Y%m%d')}"
         config["last_updated"] = datetime.now().isoformat()
         
-        # Add calibration stats
+        # Add calibration history entry
         if "calibration_history" not in config:
             config["calibration_history"] = []
         
@@ -276,10 +211,9 @@ class Calibrator:
         if not dry_run:
             with open(self.calibration_config_path, "w") as f:
                 json.dump(config, f, indent=2)
-            
-            logger.info("calibration_config_updated", path=self.calibration_config_path)
+            logger.info(f"Config updated: {self.calibration_config_path}")
         else:
-            logger.info("dry_run_complete", message="Config not written (dry_run=True)")
+            logger.info("Dry run complete - config not written")
         
         return config
 
@@ -383,14 +317,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-
-# Note: This file was created 2026-04-10
-# Calibration requires at least 7 days of forecast + observation data
-# Run weather-forecast-tracker for 7+ days first, then run calibration
-# 
-# Expected workflow:
-# 1. weather_tracker.py forecast-all (daily, cron)
-# 2. weather_tracker.py observe-all (daily, cron)
-# 3. Wait 7+ days for accuracy data
-# 4. python -m bot.calibrate (weekly, manual or cron)
